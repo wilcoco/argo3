@@ -19,6 +19,25 @@ export class MacroMap {
     this._resize();
     window.addEventListener('resize', () => this._resize());
     canvas.addEventListener('click', (e) => this._onClick(e));
+    // 모바일 터치 보강 (iOS 사파리에서 click 누락 방지)
+    let touchStart = null;
+    canvas.addEventListener('touchstart', (e) => {
+      if (e.touches.length !== 1) { touchStart = null; return; }
+      const t = e.touches[0];
+      touchStart = { x: t.clientX, y: t.clientY, t: Date.now() };
+    }, { passive: true });
+    canvas.addEventListener('touchend', (e) => {
+      if (!touchStart) return;
+      const t = e.changedTouches[0];
+      const dx = t.clientX - touchStart.x, dy = t.clientY - touchStart.y;
+      const dt = Date.now() - touchStart.t;
+      touchStart = null;
+      // 짧고 거의 움직임 없는 터치만 탭으로
+      if (dt < 500 && dx*dx + dy*dy < 100) {
+        e.preventDefault();
+        this._onClick({ clientX: t.clientX, clientY: t.clientY });
+      }
+    });
     this._raf();
   }
   _resize() {
