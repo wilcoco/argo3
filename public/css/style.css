@@ -48,7 +48,9 @@ input[type=text]{width:100%;padding:12px;border-radius:8px;border:1px solid var(
 /* 시트 */
 .sheet{position:absolute;left:0;right:0;bottom:0;z-index:20;background:var(--panel);
   border-top:1px solid var(--line2);border-radius:16px 16px 0 0;padding:18px 18px 26px;
-  transform:translateY(110%);transition:transform .28s cubic-bezier(.2,.8,.2,1);}
+  transform:translateY(110%);transition:transform .28s cubic-bezier(.2,.8,.2,1);
+  touch-action:manipulation;}
+.sheet input,.sheet button{touch-action:manipulation;}
 .sheet.open{transform:translateY(0);}
 .sheet h3{font-size:15px;margin-bottom:6px;}
 .sheet .sub{font-size:11px;color:var(--dim);margin-bottom:14px;line-height:1.5;}
