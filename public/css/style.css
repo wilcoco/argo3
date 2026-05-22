@@ -1,0 +1,105 @@
+:root{
+  --bg:#0a0e14; --panel:#121a26; --line:#22303f; --line2:#2a3a4d;
+  --txt:#cdd8e3; --dim:#6b7d8f; --pl:#3ad1c8; --en:#ff5d73; --gold:#ffc24d;
+  --t0:#3ad1c8; --t1:#ff5d73; --t2:#ffc24d;
+}
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent;}
+html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--txt);
+  font-family:'JetBrains Mono',ui-monospace,Menlo,Consolas,monospace;}
+#app{position:fixed;inset:0;}
+.screen{position:absolute;inset:0;display:none;}
+.screen.active{display:block;}
+
+/* 로그인 */
+#loginScreen{display:none;align-items:center;justify-content:center;}
+#loginScreen.active{display:flex;}
+.login-box{background:var(--panel);border:1px solid var(--line);border-radius:16px;
+  padding:32px;width:90%;max-width:360px;text-align:center;}
+.brand{font-size:22px;font-weight:700;letter-spacing:1px;color:var(--pl);}
+.brand b{color:var(--en);} .brand.sm{font-size:14px;}
+.tagline{font-size:11px;color:var(--dim);margin:8px 0 22px;}
+input[type=text]{width:100%;padding:12px;border-radius:8px;border:1px solid var(--line2);
+  background:#0d1420;color:var(--txt);font-family:inherit;font-size:14px;margin-bottom:12px;}
+.btn{padding:12px 18px;border-radius:9px;border:none;font-family:inherit;font-weight:700;
+  font-size:13px;cursor:pointer;letter-spacing:.5px;width:100%;}
+.btn.primary{background:var(--pl);color:#04201e;}
+.err{color:var(--en);font-size:11px;margin-top:10px;min-height:14px;}
+
+/* 상단바 */
+.topbar{position:absolute;top:0;left:0;right:0;z-index:30;display:flex;
+  align-items:center;justify-content:space-between;padding:10px 14px;
+  background:var(--panel);border-bottom:1px solid var(--line);}
+.wallet{display:flex;gap:12px;align-items:center;font-size:12px;}
+.wallet b{color:var(--gold);}
+.dim{color:var(--dim);}
+.tribe-badge{padding:2px 8px;border-radius:4px;font-size:10px;font-weight:700;background:var(--line2);}
+
+/* 지도 */
+#mapCanvas,#battleCanvas{position:absolute;inset:0;width:100%;height:100%;display:block;touch-action:none;}
+.maphint{position:absolute;top:54px;left:50%;transform:translateX(-50%);z-index:10;
+  background:rgba(10,14,20,.85);border:1px solid var(--line);border-radius:8px;
+  padding:6px 14px;font-size:11px;color:var(--dim);pointer-events:none;white-space:nowrap;}
+.maphint b{color:var(--pl);}
+.eco-bar{position:absolute;bottom:10px;left:10px;right:10px;z-index:10;display:flex;gap:6px;
+  font-size:9px;}
+.eco-seg{flex:1;text-align:center;padding:4px;border-radius:6px;background:rgba(10,14,20,.8);
+  border:1px solid var(--line);}
+
+/* 시트 */
+.sheet{position:absolute;left:0;right:0;bottom:0;z-index:20;background:var(--panel);
+  border-top:1px solid var(--line2);border-radius:16px 16px 0 0;padding:18px 18px 26px;
+  transform:translateY(110%);transition:transform .28s cubic-bezier(.2,.8,.2,1);}
+.sheet.open{transform:translateY(0);}
+.sheet h3{font-size:15px;margin-bottom:6px;}
+.sheet .sub{font-size:11px;color:var(--dim);margin-bottom:14px;line-height:1.5;}
+.betrow{display:flex;align-items:center;gap:10px;margin:12px 0;}
+.betrow label{font-size:11px;color:var(--dim);min-width:50px;}
+input[type=range]{flex:1;accent-color:var(--pl);height:4px;}
+.betval{font-weight:700;color:var(--gold);min-width:54px;text-align:right;}
+.btnrow{display:flex;gap:10px;}
+.btnrow .btn{flex:1;}
+.btn.ghost{background:transparent;border:1px solid var(--line2);color:var(--dim);}
+.btn.danger{background:var(--en);color:#2a0810;}
+.tag{display:inline-block;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:700;}
+.tag.me{background:#1d6e69;color:#bfffff;} .tag.enemy{background:#8a2f3c;color:#ffd5dc;}
+.tag.free{background:var(--line2);color:var(--txt);}
+
+/* 전투 HUD */
+.stakebar{position:absolute;top:10px;left:50%;transform:translateX(-50%);z-index:10;
+  background:rgba(255,194,77,.12);border:1px solid var(--gold);border-radius:6px;
+  padding:3px 12px;font-size:10px;color:var(--gold);white-space:nowrap;}
+.bhud{position:absolute;top:34px;left:0;right:0;z-index:10;display:flex;
+  justify-content:space-between;padding:6px 14px;pointer-events:none;}
+.side{background:rgba(10,14,20,.8);border:1px solid var(--line);border-radius:8px;padding:5px 12px;min-width:90px;}
+.side .lbl{font-size:9px;color:var(--dim);letter-spacing:1px;}
+.side .val{font-size:18px;font-weight:700;}
+.side.me .val{color:var(--pl);} .side.en{text-align:right;} .side.en .val{color:var(--en);}
+.bctrl{position:absolute;bottom:0;left:0;right:0;z-index:10;padding:12px 14px;
+  background:linear-gradient(transparent,rgba(10,14,20,.92) 30%);}
+.sizectrl{display:flex;align-items:center;gap:10px;margin-bottom:6px;}
+.sizectrl .l{font-size:10px;color:var(--dim);min-width:50px;}
+.sizecost{font-size:11px;color:var(--gold);min-width:60px;text-align:right;}
+.modehint{font-size:10px;color:var(--dim);text-align:center;height:14px;}
+.countdown{position:absolute;inset:0;z-index:35;display:none;align-items:center;justify-content:center;
+  background:rgba(6,9,13,.6);font-size:80px;font-weight:900;color:var(--pl);}
+.countdown.show{display:flex;}
+.overlay{position:absolute;inset:0;z-index:40;background:rgba(6,9,13,.92);
+  display:none;flex-direction:column;align-items:center;justify-content:center;padding:30px;text-align:center;}
+.overlay.show{display:flex;}
+.overlay h2{font-size:32px;letter-spacing:2px;margin-bottom:10px;}
+.overlay h2.win{color:var(--pl);} .overlay h2.lose{color:var(--en);}
+.overlay p{font-size:13px;color:var(--dim);margin-bottom:22px;line-height:1.6;}
+.overlay .btn{max-width:240px;}
+
+/* 방어 도전 알림 모달 */
+.challenge-modal{position:fixed;inset:0;z-index:60;background:rgba(6,9,13,.85);
+  display:none;align-items:center;justify-content:center;padding:24px;}
+.challenge-modal.show{display:flex;animation:cmIn .3s ease;}
+@keyframes cmIn{from{opacity:0}to{opacity:1}}
+.cm-box{background:var(--panel);border:2px solid var(--en);border-radius:16px;
+  padding:26px;width:90%;max-width:340px;text-align:center;
+  box-shadow:0 0 40px rgba(255,93,115,.3);}
+.cm-icon{font-size:44px;margin-bottom:10px;animation:cmPulse 1s infinite;}
+@keyframes cmPulse{0%,100%{transform:scale(1)}50%{transform:scale(1.15)}}
+.cm-text{font-size:14px;line-height:1.7;margin-bottom:8px;}
+.cm-count{font-size:20px;font-weight:700;color:var(--en);margin-bottom:18px;}

@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>BACTERIA WAR</title>
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<div id="app">
+  <!-- 로그인 -->
+  <div id="loginScreen" class="screen active">
+    <div class="login-box">
+      <div class="brand">BACTERIA<b>WAR</b></div>
+      <p class="tagline">지도 위 영토 생태계 · 도전으로 점령</p>
+      <input id="usernameInput" type="text" placeholder="닉네임 (2자 이상)" maxlength="24">
+      <button id="loginBtn" class="btn primary">입장</button>
+      <div id="loginError" class="err"></div>
+    </div>
+  </div>
+
+  <!-- 매크로 지도 -->
+  <div id="macroScreen" class="screen">
+    <div class="topbar">
+      <div class="brand sm">BACTERIA<b>WAR</b></div>
+      <div class="wallet">
+        <span class="tribe-badge" id="tribeBadge">―</span>
+        <span>⚡<b id="energy">0</b></span>
+        <span class="dim" id="record">0승 0패</span>
+        <span class="dim" id="terr">0영역</span>
+      </div>
+    </div>
+    <canvas id="mapCanvas"></canvas>
+    <div class="maphint">탭: <b>빈 땅 점유</b> · 적 영역 탭: <b>도전</b></div>
+    <div class="eco-bar" id="ecoBar"></div>
+
+    <!-- 액션 시트 -->
+    <div class="sheet" id="sheet"><div id="sheetBody"></div></div>
+  </div>
+
+  <!-- 마이크로 전투 -->
+  <div id="battleScreen" class="screen">
+    <canvas id="battleCanvas"></canvas>
+    <div class="stakebar" id="stakeBar"></div>
+    <div class="bhud">
+      <div class="side me"><div class="lbl">YOU</div><div class="val" id="meE">0</div></div>
+      <div class="side en"><div class="lbl">ENEMY</div><div class="val" id="enE">0</div></div>
+    </div>
+    <div class="bctrl">
+      <div class="modehint" id="modeHint">중앙 노른자를 차지하라</div>
+      <div class="sizectrl">
+        <span class="l">탑 크기</span>
+        <input type="range" id="sizeSlider" min="15" max="70" value="25">
+        <span class="sizecost" id="sizeCost">비용 25</span>
+      </div>
+    </div>
+    <div class="countdown" id="countdown"></div>
+    <div class="overlay" id="overlay">
+      <h2 id="ovTitle"></h2><p id="ovDesc"></p>
+      <button class="btn primary" id="ovBack">맵으로</button>
+    </div>
+  </div>
+</div>
+
+<!-- 방어 도전 알림 모달 -->
+<div class="challenge-modal" id="challengeModal">
+  <div class="cm-box">
+    <div class="cm-icon">⚔️</div>
+    <div class="cm-text" id="cmText"></div>
+    <div class="cm-count" id="cmCount"></div>
+    <div class="btnrow">
+      <button class="btn ghost" id="cmDecline">자동방어(AI)</button>
+      <button class="btn primary" id="cmAccept">직접 방어!</button>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+<script type="module" src="/js/app.js"></script>
+</body>
+</html>
