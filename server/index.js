@@ -11,6 +11,7 @@ import dotenv from 'dotenv';
 import { router as apiRouter } from './routes/api.js';
 import { ecosystemTick } from './game/macro.js';
 import { CONFIG } from './game/config.js';
+import { initDb } from './db/init.js';
 
 dotenv.config();
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -140,12 +141,17 @@ async function startTickLoop() {
   console.log(`생태계 틱 시작 (${CONFIG.MACRO.SERVER_TICK_MS}ms 주기)`);
 }
 
-server.listen(PORT, () => {
+server.listen(PORT, async () => {
   console.log(`🦠 BACTERIA WAR 서버 실행: 포트 ${PORT}`);
-  // DB가 준비된 경우에만 틱 시작 (DATABASE_URL 있을 때)
-  if (process.env.DATABASE_URL) {
-    startTickLoop();
-  } else {
+  if (!process.env.DATABASE_URL) {
     console.warn('⚠ DATABASE_URL 미설정 — 생태계 틱 비활성. DB 연결 후 재시작하세요.');
+    return;
+  }
+  try {
+    await initDb({ verbose: true });
+    console.log('✅ DB 준비 완료 (스키마·시드 멱등 적용).');
+    startTickLoop();
+  } catch (e) {
+    console.error('❌ DB 초기화 실패 — 서버는 떠 있지만 생태계 틱은 시작되지 않음:', e.message);
   }
 });

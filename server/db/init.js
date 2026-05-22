@@ -1,6 +1,6 @@
 // ============================================================
 //  DB 초기화 — 스키마 생성 + 종족 시드
-//  실행: npm run initdb  (또는 node server/db/init.js)
+//  서버 부팅 시 자동 호출 (멱등), CLI: npm run initdb
 // ============================================================
 import fs from 'fs';
 import path from 'path';
@@ -10,13 +10,13 @@ import { CONFIG } from '../game/config.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-async function main() {
+export async function initDb({ verbose = true } = {}) {
+  const log = verbose ? console.log : () => {};
   const schema = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
-  console.log('스키마 적용 중...');
+  log('스키마 적용 중...');
   await query(schema);
-  console.log('스키마 적용 완료.');
+  log('스키마 적용 완료.');
 
-  // 종족 시드
   for (let i = 0; i < CONFIG.TRIBE_COUNT; i++) {
     await query(
       `INSERT INTO tribes (id, name, soul_pool, total_cells)
@@ -25,21 +25,26 @@ async function main() {
       [i, CONFIG.TRIBE_NAMES[i]]
     );
   }
-  console.log(`종족 ${CONFIG.TRIBE_COUNT}개 시드 완료.`);
+  log(`종족 ${CONFIG.TRIBE_COUNT}개 시드 완료.`);
 
-  // 전역 상태 초기화
   await query(
     `INSERT INTO game_state (key, value)
      VALUES ('tick', '0'::jsonb)
      ON CONFLICT (key) DO NOTHING`
   );
-  console.log('전역 상태 초기화 완료.');
-
-  await getPool().end();
-  console.log('✅ DB 초기화 끝.');
+  log('전역 상태 초기화 완료.');
 }
 
-main().catch((e) => {
-  console.error('초기화 실패:', e.message);
-  process.exit(1);
-});
+// CLI로 직접 실행한 경우만 풀 종료 + 프로세스 종료
+const isCli = import.meta.url === `file://${process.argv[1]}`;
+if (isCli) {
+  initDb()
+    .then(async () => {
+      await getPool().end();
+      console.log('✅ DB 초기화 끝.');
+    })
+    .catch((e) => {
+      console.error('초기화 실패:', e.message);
+      process.exit(1);
+    });
+}
