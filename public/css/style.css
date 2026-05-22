@@ -52,8 +52,9 @@ input[type=text]{width:100%;padding:12px;border-radius:8px;border:1px solid var(
 .sheet.open{transform:translateY(0);}
 .sheet h3{font-size:15px;margin-bottom:6px;}
 .sheet .sub{font-size:11px;color:var(--dim);margin-bottom:14px;line-height:1.5;}
-.betrow{display:flex;align-items:center;gap:10px;margin:12px 0;}
-.betrow label{font-size:11px;color:var(--dim);min-width:50px;}
+.betrow,.slider-row{display:flex;align-items:center;gap:10px;margin:12px 0;}
+.betrow label,.slider-row label{font-size:11px;color:var(--dim);min-width:80px;}
+.slider-row span{font-weight:700;color:var(--gold);min-width:54px;text-align:right;}
 input[type=range]{flex:1;accent-color:var(--pl);height:4px;}
 .betval{font-weight:700;color:var(--gold);min-width:54px;text-align:right;}
 .btnrow{display:flex;gap:10px;}

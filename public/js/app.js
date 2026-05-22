@@ -120,19 +120,38 @@ function renderEcoBar(data) {
 
 // ---- 빈 땅 점유 ----
 function openClaim(lat, lng) {
-  const cost = CFG.MACRO.CLAIM_COST;
+  const M = CFG.MACRO;
+  const minV = M.CLAIM_MIN_VALUE, maxV = M.CLAIM_MAX_VALUE;
+  // 가진 에너지를 넘지 않게 상한 추가 클램프
+  const cap = Math.max(minV, Math.min(maxV, Math.floor(me.energy)));
+  const initV = Math.max(minV, Math.min(cap, M.CLAIM_DEFAULT_VALUE));
   $('sheetBody').innerHTML = `
     <h3>빈 땅 점유 <span class="tag free">미점유</span></h3>
-    <div class="sub">이 위치에 거점을 만든다. 비용 ⚡${cost}.</div>
+    <div class="sub">크게 점유할수록 더 많은 에너지가 들고, 영역 가치가 높아진다.</div>
+    <div class="slider-row">
+      <label>영역 가치 / 비용</label>
+      <input type="range" id="claimSize" min="${minV}" max="${cap}" value="${initV}" step="1">
+      <span id="claimSizeVal">⚡${initV}</span>
+    </div>
     <div class="btnrow">
       <button class="btn ghost" id="cancelBtn">취소</button>
-      <button class="btn primary" id="claimBtn" ${me.energy<cost?'disabled':''}>점유 (⚡${cost})</button>
+      <button class="btn primary" id="claimBtn" ${me.energy<minV?'disabled':''}>점유</button>
     </div>`;
   openSheet();
+  const slider = $('claimSize'), label = $('claimSizeVal'), btn = $('claimBtn');
+  const update = () => {
+    const v = Number(slider.value);
+    label.textContent = `⚡${v}`;
+    btn.textContent = `점유 (⚡${v})`;
+    btn.disabled = me.energy < v;
+  };
+  update();
+  slider.addEventListener('input', update);
   $('cancelBtn').onclick = closeSheet;
-  $('claimBtn').onclick = async () => {
+  btn.onclick = async () => {
     try {
-      await api('/claim', { method: 'POST', body: { playerId: me.id, lat, lng } });
+      const value = Number(slider.value);
+      await api('/claim', { method: 'POST', body: { playerId: me.id, lat, lng, value } });
       closeSheet(); await refreshMe(); await refreshCells();
     } catch (e) { alert(e.message); }
   };

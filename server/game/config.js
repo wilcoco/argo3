@@ -15,7 +15,9 @@ export const CONFIG = {
   MACRO: {
     ZOOM: 14,                  // 매크로 지도 줌
     CELL_SIZE_M: 200,          // 한 영역 셀의 실제 크기 (미터, 대략)
-    CLAIM_COST: 40,            // 빈 땅 점유 비용
+    CLAIM_MIN_VALUE: 20,       // 최소 영역 가치(=점유 비용 최저)
+    CLAIM_MAX_VALUE: 90,       // 최대 영역 가치(=점유 비용 최고)
+    CLAIM_DEFAULT_VALUE: 40,   // 슬라이더 초기값
     INCOME_PER_CELL: 0.6,      // 셀당 시간당 수입 (서버 틱 기준)
     CORE_BONUS: 2.0,           // 노른자(밀집지) 셀 수입 배율
     DENSITY_RADIUS: 3,         // 밀도 측정 반경 (셀)
@@ -85,7 +87,7 @@ export const CONFIG = {
   },
 
   // ---- 시작 자원 ----
-  START_ENERGY: 120,
+  START_ENERGY: 100,
 };
 
 // 상성 판정: ta가 tb를 이기는가

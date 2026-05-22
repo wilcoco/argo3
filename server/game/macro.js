@@ -66,25 +66,32 @@ export async function getCellsInBounds(minLat, minLng, maxLat, maxLng) {
 }
 
 // ---- 빈 땅 점유 ----
-export async function claimCell(playerId, lat, lng) {
+// value = 영역 가치(=점유 비용). 클라이언트가 슬라이더로 정한 값.
+export async function claimCell(playerId, lat, lng, value) {
   const { cellX, cellY } = latLngToCell(lat, lng);
+  // 서버 권위적으로 범위 클램프 — 클라이언트 변조 방지
+  const v = Math.max(MAC.CLAIM_MIN_VALUE,
+            Math.min(MAC.CLAIM_MAX_VALUE,
+              Math.round(Number.isFinite(value) ? value : MAC.CLAIM_DEFAULT_VALUE)));
   return tx(async (client) => {
     const p = (await client.query(`SELECT * FROM players WHERE id=$1 FOR UPDATE`, [playerId])).rows[0];
     if (!p) throw new Error('플레이어 없음');
-    if (p.energy < MAC.CLAIM_COST) throw new Error('에너지 부족');
+    if (p.energy < v) throw new Error('에너지 부족');
 
     const existing = (await client.query(`SELECT * FROM cells WHERE cell_x=$1 AND cell_y=$2`, [cellX, cellY])).rows[0];
     if (existing && existing.owner_id) throw new Error('이미 점유된 영역');
 
+    // 영역 가치에 비례해 기본 방어 베팅도 책정 (대략 가치의 절반)
+    const defBet = Math.round(v * 0.5);
     const center = cellToLatLng(cellX, cellY);
     await client.query(
       `INSERT INTO cells (cell_x, cell_y, owner_id, tribe, value, def_bet, lat, lng)
-       VALUES ($1,$2,$3,$4,40,20,$5,$6)
-       ON CONFLICT (cell_x, cell_y) DO UPDATE SET owner_id=$3, tribe=$4`,
-      [cellX, cellY, playerId, p.tribe, center.lat, center.lng]
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+       ON CONFLICT (cell_x, cell_y) DO UPDATE SET owner_id=$3, tribe=$4, value=$5, def_bet=$6`,
+      [cellX, cellY, playerId, p.tribe, v, defBet, center.lat, center.lng]
     );
-    await client.query(`UPDATE players SET energy = energy - $1 WHERE id=$2`, [MAC.CLAIM_COST, playerId]);
-    return { cellX, cellY, ...center };
+    await client.query(`UPDATE players SET energy = energy - $1 WHERE id=$2`, [v, playerId]);
+    return { cellX, cellY, value: v, ...center };
   });
 }
 

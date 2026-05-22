@@ -44,8 +44,8 @@ router.get('/cells', async (req, res) => {
 // 빈 땅 점유
 router.post('/claim', async (req, res) => {
   try {
-    const { playerId, lat, lng } = req.body;
-    const result = await claimCell(Number(playerId), +lat, +lng);
+    const { playerId, lat, lng, value } = req.body;
+    const result = await claimCell(Number(playerId), +lat, +lng, value != null ? +value : undefined);
     res.json(result);
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
