@@ -41,22 +41,16 @@ export class Battle {
     // HUD 라벨도 진영에 맞게
     document.querySelector('.side.me .lbl').textContent = this.mySide === 'atk' ? 'YOU(공격)' : 'YOU(방어)';
     document.querySelector('.side.en .lbl').textContent = 'ENEMY';
-    // 상대(foe) 시작 거점 — PvP면 양쪽 다 사람이 짓지만, 방어측 초기 거점은 노른자 근처에 줌
-    if (!this.pvp) {
-      // AI 상대: 기존처럼 노른자에 시작 거점 (상대가 def일 때) 또는 atk일 때 측면
-      const er = Math.max(20, Math.min(40, 18 + Math.sqrt(this.energy[this.foeSide]) * 1.5));
-      const fx = this.foeSide === 'def' ? this.arena.cx : this.arena.cx - this.arena.r * 0.45;
-      const fy = this.arena.cy;
-      this.towers.push({ id: this.nextId++, side: this.foeSide, x: fx, y: fy, radius: er, maxHp: er, hp: er });
-    } else {
-      // PvP: 양쪽 시작 거점을 대칭으로 (도전자 좌, 방어자 우)
-      const mkStart = (side, sign) => {
-        const er = 24;
-        this.towers.push({ id: this.nextId++, side, x: this.arena.cx + sign * this.arena.r * 0.45,
-          y: this.arena.cy, radius: er, maxHp: er, hp: er });
-      };
-      mkStart('atk', -1); mkStart('def', 1);
-    }
+    // 양쪽 시작 거점 — 대칭 스폰. 노른자는 비워두고 양쪽이 경쟁해서 점유한다.
+    // 도전자=좌측, 방어자=우측. 시작 탑 크기는 베팅에 약간 비례.
+    const startRadius = (bet) => Math.max(20, Math.min(34, 18 + Math.sqrt(bet) * 1.4));
+    const mkStart = (side, sign) => {
+      const er = startRadius(this.energy[side]);
+      this.towers.push({ id: this.nextId++, side, x: this.arena.cx + sign * this.arena.r * 0.55,
+        y: this.arena.cy, radius: er, maxHp: er, hp: er });
+    };
+    mkStart('atk', -1);
+    mkStart('def', 1);
     // PvP 네트워크 수신 핸들러
     if (this.pvp && this.socket) this._setupNet();
     this._countdown();
