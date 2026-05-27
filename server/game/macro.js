@@ -59,7 +59,8 @@ export async function getCellsInBounds(minLat, minLng, maxLat, maxLng) {
   const r = await query(
     `SELECT c.*, p.username, p.is_hero
      FROM cells c LEFT JOIN players p ON c.owner_id = p.id
-     WHERE cell_x BETWEEN $1 AND $2 AND cell_y BETWEEN $3 AND $4`,
+     WHERE cell_x BETWEEN $1 AND $2 AND cell_y BETWEEN $3 AND $4
+       AND c.owner_id IS NOT NULL`,
     [x0, x1, y0, y1]
   );
   return r.rows;
@@ -416,7 +417,9 @@ export async function ecosystemTick(io) {
     const contrib = Number(d.karma) + Number(d.combat_wins) * ECO.COMBAT_DEATH_HERO_BONUS;
     await query(`UPDATE tribes SET soul_pool = soul_pool + $1 WHERE id=$2`, [contrib, d.tribe]);
     await query(`UPDATE players SET alive=FALSE WHERE id=$1`, [d.id]);
-    await query(`UPDATE cells SET owner_id=NULL, tribe=NULL WHERE owner_id=$1`, [d.id]);
+    // 자연사 시 셀 자체를 삭제 — owner_id를 null로만 두면 클라이언트에 stale로 남아
+    // "점유되지 않은 영역" 도전 오류를 유발. 영토는 진짜 비어 있어야 한다.
+    await query(`DELETE FROM cells WHERE owner_id=$1`, [d.id]);
   }
 
   // 4) 종족 영토 캐시 + 약자 추적

@@ -281,7 +281,14 @@ async function startChallenge(c, atkBet) {
       return;
     }
     alert('알 수 없는 응답');
-  } catch (e) { alert(e.message); }
+  } catch (e) {
+    alert(e.message);
+    // 점유 상태가 어긋났을 가능성 — 셀 새로고침으로 화면 동기화
+    if (/점유되지 않은|이미 점유|면제|에너지/.test(e.message || '')) {
+      closeSheet();
+      refreshCells();
+    }
+  }
 }
 
 // 큐 대기 오버레이
