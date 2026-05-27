@@ -99,9 +99,46 @@
 
 ---
 
+## 9. 보안 감사 결과 (출시 전 필수)
+
+> 2026-05-27 보안 리뷰 결과. **모두 인증이 없어서 생기는 문제** — 인증(JWT/세션)을 붙이면 대부분 자동으로 닫힘.
+> 친구·소수 테스트 동안은 즉시 익스플로잇 위험 낮음. 외부 공개 직전에는 Phase 0+1 반드시 완료.
+
+### Phase 0 — 인증 없이도 즉시 가능한 1~2시간 작업
+- **XSS (High)**: `public/js/app.js`의 `innerHTML` 8군데에 `username` 직접 보간 (`<svg/onload=...>` 23자로 24자 제한 우회). → 모두 `textContent`로 변경 + 서버에 username 정규식 `^[\p{L}\p{N}_\- ]{2,24}$` 추가
+- **전투 결과 위조 (High)**: `POST /api/challenge/:id/resolve`가 본문 `pvpWinner`를 그대로 신뢰. → 항상 서버 `simulateBattle`로 판정. PvP는 양쪽 보고 대조하거나 서버 권위 시뮬로 대체
+- **GPS 1km 우회 (High)**: `claimCell`이 `if (playerLoc && finite(...))`라 본문에서 빼면 통과. → `playerLoc` 필수 + 무효 시 거부
+- **전 세계 셀 덤프 (Medium)**: `GET /api/cells`가 영역 크기 무제한. `minLat=-90&maxLat=90` 한 방에 모든 플레이어 GPS+username 노출. → 영역 크기 상한 (예: ≤ 0.5°×0.5°)
+- **도전에 GPS 제약 없음 (Medium)**: `claim`엔 있는데 `startChallenge`엔 없음. → 동일 1km 반경 적용
+
+### Phase 1 — 인증 도입 (반나절~1일, 본질적 해결)
+- `/api/player` 응답에 서버 발급 비밀 토큰 추가 (세션 or JWT), 클라가 `localStorage`에 보관 후 모든 요청에 `Authorization: Bearer` 헤더
+- Socket.IO 핸드셰이크에서 `io({auth: {token}})`로 검증, `socket.data.playerId`를 서버가 토큰에서 추출 (클라이언트 `player:online` 이벤트의 ID 무시)
+- 모든 엔드포인트가 `playerId === session.playerId` 검증
+- **이걸로 자동으로 닫히는 취약점**:
+  - Vuln 1 계정 탈취 (`POST /api/player`로 누구든 됨)
+  - Vuln 4 Socket 신원 위조 (`player:online` 임의 ID 등록)
+  - Vuln 6 남의 큐 항목 취소
+  - Vuln 8 skipRest 본문 신뢰
+  - Vuln 11 무인증 battle 이벤트 (`battle:state`로 상대 시뮬 조작)
+
+### Phase 2 — 방어 심화
+- **CORS**: `app.use(cors())` → 운영 도메인만 화이트리스트. Socket.IO `origin: '*'` 도 같이
+- **CSRF**: 토큰 기반 인증이면 자동 완화. 쿠키 인증으로 가면 SameSite=Lax + CSRF 토큰 필수
+- **battleId 비추측**: 현재 BIGSERIAL이라 enum 가능. UUID로 변경하거나 토큰화
+
+### 참고 — 보안 감사 시 검토한 파일과 라인
+- `server/routes/api.js`: 모든 엔드포인트 (12, 19-26, 46-59, 62-68, 71-77, 88-94, 97-103, 37-43)
+- `server/index.js`: 소켓 핸들러 (21, 32, 47-51, 107-122, 125-133, 144-146)
+- `server/game/macro.js`: claimCell GPS 가드 (71-106), resolveChallenge (267-)
+- `public/js/app.js`: innerHTML 사용처 (213, 235, 298, 321, 348, 362, 434, 478)
+
+---
+
 ## 우선순위 제안 (참고)
 
 1. **지금**: 단일 서버로 출시·실사용 데이터 수집. 부하 경감(1-1) 정도만 미리.
-2. **사용자 늘면**: PvP 견고화(2), 인증(3), 무적시간대 등 핵심 기능(4).
-3. **성공 후**: 수평 확장(1-3), 매크로 생태계 풀구현(6).
-4. **별도 트랙**: 신 게임 모드(5)는 본류 안정화 후 또는 2번째 게임으로.
+2. **외부 공개 직전**: 보안 Phase 0+1 (9장) 반드시 완료.
+3. **사용자 늘면**: PvP 견고화(2), 무적시간대 등 핵심 기능(4).
+4. **성공 후**: 수평 확장(1-3), 매크로 생태계 풀구현(6), 보안 Phase 2.
+5. **별도 트랙**: 신 게임 모드(5)는 본류 안정화 후 또는 2번째 게임으로.
