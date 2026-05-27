@@ -234,6 +234,26 @@ export class Battle {
       this.socket.emit('battle:action',{battleId:this.battleId,action:{type:'build',id,x,y,r}});
     return true;
   }
+  // 같은 진영에서 영역이 (조금이라도) 겹치는 탑들. from 본인 포함.
+  // 거리 < 두 반경의 합 이면 겹침으로 본다.
+  _cluster(from){
+    return this.towers.filter(t =>
+      t.side === from.side &&
+      Math.hypot(t.x - from.x, t.y - from.y) <= t.radius + from.radius
+    );
+  }
+  // 연동 사격: 선택한 탑 + 영역 겹치는 아군 탑들이 동시에 같은 적을 향해 발사.
+  // 각자 자기 HP 35% 비용, 각자 정상 데미지. 발사는 약간씩 시차를 둬서 barrage 느낌.
+  _fireCluster(from, to){
+    const cluster = this._cluster(from);
+    let i = 0;
+    for (const t of cluster) {
+      const delay = i * 60;  // 60ms 시차
+      if (delay === 0) this._fire(t, to);
+      else setTimeout(() => { if (this.running && this.towers.includes(t) && this.towers.includes(to)) this._fire(t, to); }, delay);
+      i++;
+    }
+  }
   _fire(from,to){
     const dx=to.x-from.x,dy=to.y-from.y,d=Math.sqrt(dx*dx+dy*dy);
     const cost=Math.floor(from.hp*this.cfg.MICRO.RANGED_COST_RATIO);if(cost<3)return;
@@ -255,7 +275,7 @@ export class Battle {
     const mine=this.towers.filter(t=>t.side===ai), foe=this.towers.filter(t=>t.side===this.mySide);
     if(mine.length && foe.length && Math.random()<S*0.5){
       const sh=mine.slice().sort((a,b)=>b.hp-a.hp)[0];
-      if(sh.hp/sh.maxHp>=champ.rangedThresh){ this._fire(sh, foe.slice().sort((a,b)=>a.hp-b.hp)[0]); return; }
+      if(sh.hp/sh.maxHp>=champ.rangedThresh){ this._fireCluster(sh, foe.slice().sort((a,b)=>a.hp-b.hp)[0]); return; }
     }
     if(mine.length>=champ.maxTowers)return;
     const r = S>0.5 ? champ.towerSize+Math.random()*8 : 30+Math.random()*20;
@@ -344,10 +364,22 @@ export class Battle {
     ctx.fillStyle='rgba(255,210,120,0.9)';ctx.font='bold 10px monospace';ctx.textAlign='center';
     ctx.fillText('⭐생산'+M.CORE_PROD_MULT+'배',this.arena.cx,this.arena.cy+3);
     ctx.restore();
+    // 클러스터 강조 — 선택 탑이 있으면 동시발사 후보를 점선 강조
+    const clusterSet = this.selTower
+      ? new Set(this._cluster(this.selTower))
+      : null;
     // 탑
     for(const t of this.towers){
       const col=this._colorOf(t.side);
       ctx.beginPath();ctx.arc(t.x,t.y,t.radius,0,Math.PI*2);ctx.fillStyle=col.f;ctx.fill();
+      // 클러스터 멤버 (선택 탑 자신 제외) → 점선 흰 외곽
+      if (clusterSet && clusterSet.has(t) && t !== this.selTower) {
+        ctx.save();
+        ctx.setLineDash([5,4]);
+        ctx.strokeStyle='rgba(255,255,255,0.85)'; ctx.lineWidth=2;
+        ctx.beginPath();ctx.arc(t.x,t.y,t.radius+2,0,Math.PI*2);ctx.stroke();
+        ctx.restore();
+      }
       ctx.lineWidth=t===this.selTower?3:1.5;ctx.strokeStyle=t===this.selTower?'#fff':col.s;ctx.stroke();
       const hpf=Math.max(0,t.hp/t.maxHp);
       ctx.beginPath();ctx.arc(t.x,t.y,t.radius+4,-Math.PI/2,-Math.PI/2+Math.PI*2*hpf);
@@ -400,7 +432,7 @@ export class Battle {
     const ME=this.mySide, FOE=this.foeSide;
     // ── 모드 1: 내 탑 선택됨 → 적 탑 탭으로 사격, 다른 내 탑 탭으로 선택 전환, 그 외는 무시
     if(this.selTower){
-      if(hit&&hit.side===FOE){this._fire(this.selTower,hit);this.selTower=null;hint.textContent='중앙 노른자를 차지하라';return;}
+      if(hit&&hit.side===FOE){this._fireCluster(this.selTower,hit);this.selTower=null;hint.textContent='중앙 노른자를 차지하라';return;}
       if(hit&&hit.side===ME){this.selTower=hit;return;}
       this.selTower=null;hint.textContent='중앙 노른자를 차지하라';return;
     }
@@ -408,7 +440,12 @@ export class Battle {
     if(hit&&hit.side===ME){
       // 건설 후보 있었으면 취소 (배타적)
       if(this.pendingPlace) this._cancelPlace();
-      this.selTower=hit;hint.textContent='적 탑 탭=장거리 공격';return;
+      this.selTower=hit;
+      const n = this._cluster(hit).length;
+      hint.textContent = n > 1
+        ? `적 탑 탭=클러스터 사격 (아군 ${n}개 동시 발사)`
+        : '적 탑 탭=장거리 공격';
+      return;
     }
     // ── 모드 3: 빈 곳 탭 → 건설 후보 위치 표시 (확정은 버튼)
     if(!this._inArena(x,y)){ this.outsideFlash=performance.now(); return; }
