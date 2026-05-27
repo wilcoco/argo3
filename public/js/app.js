@@ -220,9 +220,21 @@ function openCell(c) {
   const minBet = Math.ceil(c.def_bet * CFG.BETTING.CHALLENGE_MIN_RATIO);
   const assets = me.energy + 30;
   const cap = assets >= CFG.BETTING.CAP_THRESHOLD ? Math.floor(me.energy * CFG.BETTING.CAP_RATIO) : Math.floor(me.energy);
+  // 큐 길이 미리 조회 (실패해도 무시)
+  api(`/queue/status?cellId=${c.id}&playerId=${me.id}`).then((q) => {
+    const info = document.getElementById('queueInfo');
+    if (!info) return;
+    if (q.queueLen > 0 || q.restRemainingSec > 0) {
+      const parts = [];
+      if (q.queueLen > 0) parts.push(`대기 ${q.queueLen}명`);
+      if (q.restRemainingSec > 0) parts.push(`방어자 휴식 ${Math.ceil(q.restRemainingSec)}초`);
+      info.innerHTML = `<span class="warn-inline">⏳ ${parts.join(' · ')} — 도전 시 줄을 섭니다</span>`;
+    }
+  }).catch(() => {});
   $('sheetBody').innerHTML = `
     <h3>${c.username || '적 거점'} <span class="tag enemy">적 영역</span></h3>
     <div class="sub">가치 ${c.value} · 방어 베팅 ⚡${c.def_bet}<br>이기면 점유권+베팅 획득, 지면 베팅 손실</div>
+    <div id="queueInfo" class="sub"></div>
     <div class="betrow"><label>내 베팅</label>
       <input type="range" id="betSlider" min="${minBet}" max="${Math.max(minBet,cap)}" value="${minBet}">
       <span class="betval" id="betVal">⚡${minBet}</span></div>
@@ -244,21 +256,60 @@ async function startChallenge(c, atkBet) {
   try {
     const result = await api('/challenge', { method: 'POST',
       body: { playerId: me.id, cellX: c.cell_x, cellY: c.cell_y, atkBet } });
-    pending = { battleId: result.battle.id, cell: c, atkBet, defBet: c.def_bet, mySide: 'atk',
-                proximity: result.proximity };
-    closeSheet();
-    socket.emit('battle:join', result.battle.id);
-    // 방어자에게 도전 알림 → 응답 대기
-    socket.emit('challenge:initiate', {
-      battleId: result.battle.id,
-      defenderId: c.owner_id,
-      attackerName: me.username,
-      regionName: c.username || '적 거점',
-      atkBet, defBet: c.def_bet,
-    });
-    // 대기 화면 표시 (응답은 소켓 이벤트로)
-    showWaiting(c);
+
+    // (A) 즉시 전투 시작 (셀이 한가)
+    if (result.battle) {
+      pending = { battleId: result.battle.id, cell: c, atkBet, defBet: c.def_bet, mySide: 'atk',
+                  proximity: result.proximity };
+      closeSheet();
+      socket.emit('battle:join', result.battle.id);
+      socket.emit('challenge:initiate', {
+        battleId: result.battle.id,
+        defenderId: c.owner_id,
+        attackerName: me.username,
+        regionName: c.username || '적 거점',
+        atkBet, defBet: c.def_bet,
+      });
+      showWaiting(c);
+      return;
+    }
+    // (B) 큐 등록됨 — 셀이 다른 전투 중이거나 휴식 중
+    if (result.queued) {
+      pending = { queued: true, cellId: result.queued.cellId, cell: c, atkBet, defBet: c.def_bet };
+      closeSheet();
+      showQueueOverlay(c, result.queued);
+      return;
+    }
+    alert('알 수 없는 응답');
   } catch (e) { alert(e.message); }
+}
+
+// 큐 대기 오버레이
+function showQueueOverlay(c, q) {
+  show('battleScreen');
+  const ov = $('overlay');
+  $('ovTitle').textContent = '대기열';
+  $('ovTitle').className = '';
+  const rest = q.restRemainingSec > 0
+    ? `방어자 휴식 중 — ${Math.ceil(q.restRemainingSec)}초 남음`
+    : '진행 중 전투 끝나는 대로';
+  const sel = q.oddsText || `대기 ${q.queueLen}명`;
+  $('ovDesc').innerHTML =
+    `${c.username || '거점'} · ${sel}<br>` +
+    `<span class="dim">${rest}<br>` +
+    `차례가 오면 자동 알림. 다른 일 해도 됩니다.<br>` +
+    `(친구 담합 방지 위해 줄선 사람 중 무작위로 뽑힙니다)</span><br>` +
+    `<button class="btn ghost" id="qCancelBtn" style="margin-top:14px">대기 취소</button>`;
+  $('ovBack').style.display = '';
+  ov.classList.add('show');
+  $('qCancelBtn').onclick = async () => {
+    try {
+      await api('/queue/cancel', { method: 'POST', body: { playerId: me.id, cellId: pending.cellId } });
+      pending = null;
+      show('macroScreen');
+      ov.classList.remove('show');
+    } catch (e) { alert(e.message); }
+  };
 }
 
 // 도전자: 방어자 응답 대기 화면
@@ -290,6 +341,68 @@ function beginPvP() {
 
 // ---- 소켓 이벤트 바인딩 (initGame에서 호출) ----
 function bindBattleSockets() {
+  // 도전자: 큐에서 차례가 왔음 — 응답 모달
+  socket.on('challenge:turn', (data) => {
+    if (!pending || !pending.queued || pending.cellId !== data.cellId) {
+      // 다른 세션이거나 이미 취소됨 — 그래도 차례가 왔으니 표시 시도
+      pending = { queued: false, battleId: data.battleId, cell: pending?.cell || { username: data.regionName, owner_id: data.defenderId },
+                  atkBet: data.atkBet, defBet: data.defBet, mySide: 'atk', proximity: data.proximity };
+    } else {
+      pending.battleId = data.battleId;
+      pending.atkBet = data.atkBet;
+      pending.defBet = data.defBet;
+      pending.proximity = data.proximity;
+      pending.queued = false;
+      pending.mySide = 'atk';
+    }
+    const ov = $('overlay');
+    $('ovTitle').textContent = '⚔️ 차례가 왔습니다!';
+    $('ovTitle').className = '';
+    $('ovDesc').innerHTML =
+      `${pending.cell?.username || '거점'} · 베팅 ⚡${data.atkBet} vs ⚡${data.defBet}<br>` +
+      `<span class="dim" id="turnCountdown">${data.waitSec}초 안에 시작</span><br>` +
+      `<div class="btnrow" style="margin-top:14px">` +
+        `<button class="btn ghost" id="turnSkipBtn">포기</button>` +
+        `<button class="btn primary" id="turnAcceptBtn">전투 시작</button>` +
+      `</div>`;
+    $('ovBack').style.display = 'none';
+    ov.classList.add('show');
+    let n = data.waitSec;
+    const t = setInterval(() => {
+      n--;
+      const el = document.getElementById('turnCountdown');
+      if (!el) { clearInterval(t); return; }
+      if (n <= 0) { clearInterval(t); return; }
+      el.textContent = `${n}초 안에 시작`;
+    }, 1000);
+    $('turnAcceptBtn').onclick = () => {
+      clearInterval(t);
+      socket.emit('challenge:turn_accept', {
+        battleId: pending.battleId,
+        defenderId: pending.cell?.owner_id,
+        atkBet: pending.atkBet, defBet: pending.defBet,
+        regionName: pending.cell?.username || '거점',
+      });
+      socket.emit('battle:join', pending.battleId);
+      ov.classList.remove('show');
+      showWaiting(pending.cell);
+    };
+    $('turnSkipBtn').onclick = async () => {
+      clearInterval(t);
+      try { await api('/queue/cancel', { method: 'POST', body: { playerId: me.id, cellId: data.cellId } }); } catch (e) {}
+      pending = null;
+      show('macroScreen'); ov.classList.remove('show'); $('ovBack').style.display = '';
+      refreshCells(); refreshMe();
+    };
+  });
+  socket.on('challenge:turn_timeout', () => {
+    if (!pending) return;
+    pending = null;
+    alert('응답 시간 초과 — 베팅을 잃었습니다.');
+    show('macroScreen'); $('overlay').classList.remove('show'); $('ovBack').style.display = '';
+    refreshCells(); refreshMe();
+  });
+
   // 도전자: 대기 안내
   socket.on('challenge:waiting', ({ waitSec }) => {
     let n = waitSec;

@@ -9,7 +9,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { router as apiRouter } from './routes/api.js';
-import { ecosystemTick } from './game/macro.js';
+import { ecosystemTick, processQueueTick } from './game/macro.js';
 import { CONFIG } from './game/config.js';
 import { initDb } from './db/init.js';
 
@@ -79,6 +79,30 @@ io.on('connection', (socket) => {
     }
   });
 
+  // 큐에서 차례된 도전자가 수락 (응답 타이머 해제 → 정상 도전 흐름으로)
+  socket.on('challenge:turn_accept', ({ battleId, defenderId, atkBet, defBet, regionName }) => {
+    if (!ackChallengerTurn(battleId)) return;
+    // 그 후 도전자 클라이언트가 일반 challenge:initiate를 다시 보내 방어자에게 알림
+    const defSid = onlinePlayers.get(Number(defenderId));
+    if (defSid) {
+      pendingChallenges.set(battleId, { resolved: false, attackerSocket: socket.id });
+      io.to(defSid).emit('challenge:incoming', {
+        battleId, attackerName: '대기열 도전자', regionName, atkBet, defBet,
+      });
+      const t = setTimeout(() => {
+        const pc = pendingChallenges.get(battleId);
+        if (!pc || pc.resolved) return;
+        pc.resolved = true;
+        pendingChallenges.delete(battleId);
+        io.to(socket.id).emit('challenge:fallback_ai', { battleId });
+      }, (CONFIG.MICRO.DEFENSE_WAIT_SEC || 15) * 1000);
+      pendingChallenges.get(battleId).timer = t;
+      io.to(socket.id).emit('challenge:waiting', { battleId, waitSec: CONFIG.MICRO.DEFENSE_WAIT_SEC || 15 });
+    } else {
+      io.to(socket.id).emit('challenge:fallback_ai', { battleId });
+    }
+  });
+
   // 방어자가 수락
   socket.on('challenge:accept', ({ battleId }) => {
     const pc = pendingChallenges.get(battleId);
@@ -126,6 +150,46 @@ io.on('connection', (socket) => {
   });
 });
 
+// 큐에서 차례가 된 도전자에게 알림 + 응답 대기 (미응답 시 다음으로 이양)
+const turnPending = new Map();   // battleId → {timer, attackerId}
+function notifyChallengerTurn(popped) {
+  const { battle, cell, defender, proximity, challengerId } = popped;
+  const sid = onlinePlayers.get(Number(challengerId));
+  const waitSec = CONFIG.MACRO.CHALLENGER_RESPONSE_SEC;
+  if (sid) {
+    io.to(sid).emit('challenge:turn', {
+      battleId: Number(battle.id),
+      cellId: Number(cell.id),
+      cellX: cell.cell_x, cellY: cell.cell_y,
+      atkBet: Number(battle.atk_bet), defBet: Number(battle.def_bet),
+      regionName: defender?.username || '거점',
+      defenderId: cell.owner_id,
+      waitSec, proximity,
+    });
+  }
+  // 응답 대기 — 미응답 시 전투 자동 종료(방어자 자동승, 도전자 베팅 손실)
+  // 그러면 자연스럽게 큐의 다음 도전자가 다음 틱에 팝됨
+  const timer = setTimeout(async () => {
+    const pc = turnPending.get(Number(battle.id));
+    if (!pc) return;
+    turnPending.delete(Number(battle.id));
+    try {
+      // 도전자 미응답 = 방어자 승리로 즉시 해소
+      const { resolveChallenge } = await import('./game/macro.js');
+      await resolveChallenge(Number(battle.id), { pvpWinner: 'defender' });
+      if (sid) io.to(sid).emit('challenge:turn_timeout', { battleId: Number(battle.id) });
+    } catch (e) { console.error('turn timeout 처리 오류:', e.message); }
+  }, waitSec * 1000);
+  turnPending.set(Number(battle.id), { timer, attackerId: challengerId });
+}
+
+// 도전자가 차례를 수락하면 타이머 해제
+function ackChallengerTurn(battleId) {
+  const pc = turnPending.get(Number(battleId));
+  if (pc) { clearTimeout(pc.timer); turnPending.delete(Number(battleId)); return true; }
+  return false;
+}
+
 // ---- 생태계 틱 루프 ----
 let tickTimer = null;
 async function startTickLoop() {
@@ -133,6 +197,11 @@ async function startTickLoop() {
   const run = async () => {
     try {
       await ecosystemTick(io);
+      // 휴식 끝나고 큐가 있는 셀들 — 다음 도전자 자동 팝
+      const popped = await processQueueTick();
+      for (const p of popped) {
+        notifyChallengerTurn(p);
+      }
     } catch (e) {
       console.error('tick 오류:', e.message);
     }

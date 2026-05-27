@@ -4,8 +4,9 @@
 import express from 'express';
 import {
   createPlayer, getPlayer, getCellsInBounds, claimCell,
-  startChallenge, resolveChallenge, getTick,
+  startChallenge, resolveChallenge, getTick, cancelQueueEntry, skipRest,
 } from '../game/macro.js';
+import { query } from '../db/pool.js';
 import { estimateWinProb } from '../game/battle.js';
 import { CONFIG } from '../game/config.js';
 
@@ -82,3 +83,41 @@ router.get('/winprob', (req, res) => {
 });
 
 router.get('/tick', async (req, res) => res.json({ tick: await getTick() }));
+
+// 방어자: 짧은 휴식 스킵하고 다음 도전 받기
+router.post('/defender/ready', async (req, res) => {
+  try {
+    const { playerId, cellId } = req.body;
+    const result = await skipRest(Number(cellId), Number(playerId));
+    res.json(result);
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+// 대기열 취소
+router.post('/queue/cancel', async (req, res) => {
+  try {
+    const { playerId, cellId } = req.body;
+    const ok = await cancelQueueEntry(Number(cellId), Number(playerId));
+    res.json({ removed: ok });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+// 대기열 상태 — 특정 셀의 큐 길이와 내 위치
+router.get('/queue/status', async (req, res) => {
+  try {
+    const cellId = Number(req.query.cellId);
+    const playerId = req.query.playerId != null ? Number(req.query.playerId) : null;
+    const rows = (await query(
+      `SELECT challenger_id, queued_at FROM cell_queue WHERE cell_id=$1 ORDER BY queued_at ASC`,
+      [cellId])).rows;
+    let position = -1;
+    rows.forEach((r, i) => { if (r.challenger_id === playerId) position = i + 1; });
+    const cell = (await query(`SELECT rest_until FROM cells WHERE id=$1`, [cellId])).rows[0];
+    const tick = await getTick();
+    const tickSec = CONFIG.MACRO.SERVER_TICK_MS / 1000;
+    const restRemainingSec = cell && cell.rest_until
+      ? Math.max(0, (Number(cell.rest_until) - tick) * tickSec)
+      : 0;
+    res.json({ queueLen: rows.length, position, restRemainingSec });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});

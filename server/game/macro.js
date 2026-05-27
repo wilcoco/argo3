@@ -105,7 +105,9 @@ export async function claimCell(playerId, lat, lng, value, playerLoc) {
   });
 }
 
-// ---- 도전(전투) 시작: 검증 후 battle 레코드 생성 ----
+// ---- 도전(전투) 시작 ----
+// 셀이 한가하면 즉시 전투, 다른 전투 중이거나 휴식 중이면 큐에 등록.
+// 반환: { battle, cell, attacker, defender, proximity }  OR  { queued: {position, queueLen, restRemainingSec} }
 export async function startChallenge(attackerId, cellX, cellY, atkBet) {
   return tx(async (client) => {
     const cell = (await client.query(`SELECT * FROM cells WHERE cell_x=$1 AND cell_y=$2 FOR UPDATE`, [cellX, cellY])).rows[0];
@@ -122,22 +124,142 @@ export async function startChallenge(attackerId, cellX, cellY, atkBet) {
     // 베팅 검증 (명세서 6장)
     const minBet = Math.ceil(cell.def_bet * CONFIG.BETTING.CHALLENGE_MIN_RATIO);
     if (atkBet < minBet) throw new Error(`최소 베팅 ${minBet} 이상 필요`);
-    const atkAssets = atk.energy + 30; // 간이 자산
+    const atkAssets = atk.energy + 30;
     const cap = maxBet(atk.energy, atkAssets);
     if (atkBet > cap) throw new Error(`베팅 상한 ${cap} 초과`);
     if (atk.energy < atkBet) throw new Error('에너지 부족');
 
+    // 한가? — 진행 중 전투 없음 AND 휴식 종료
+    const busy = (await client.query(
+      `SELECT 1 FROM battles WHERE cell_id=$1 AND status='active' LIMIT 1`, [cell.id])).rowCount > 0;
+    const resting = cell.rest_until && tick < cell.rest_until;
+    const tickMs = CONFIG.MACRO.SERVER_TICK_MS;
+
+    if (busy || resting) {
+      // 큐에 등록 (이미 같은 도전자가 줄 서 있으면 UNIQUE 제약으로 거부)
+      try {
+        await client.query(
+          `INSERT INTO cell_queue (cell_id, challenger_id, atk_bet) VALUES ($1,$2,$3)`,
+          [cell.id, attackerId, atkBet]);
+      } catch (e) {
+        if (String(e.message).includes('duplicate') || e.code === '23505') {
+          throw new Error('이미 이 영역의 대기열에 들어 있습니다');
+        }
+        throw e;
+      }
+      const queueLen = Number((await client.query(
+        `SELECT COUNT(*)::int AS n FROM cell_queue WHERE cell_id=$1`, [cell.id])).rows[0].n);
+      // 랜덤 선택 모드에서는 '순서'가 의미 없고 '나도 뽑힐 후보'로만 표시
+      const isRandom = CONFIG.MACRO.QUEUE_SELECTION === 'random';
+      const restRemainingSec = resting
+        ? Math.max(0, (Number(cell.rest_until) - tick) * (tickMs/1000))
+        : 0;
+      return { queued: {
+        queueLen, restRemainingSec,
+        cellId: Number(cell.id),
+        selection: CONFIG.MACRO.QUEUE_SELECTION,
+        // 랜덤이면 "확률 1/N", FIFO면 별도로 계산해 추가 가능
+        oddsText: isRandom ? `${queueLen}명 중 무작위 선택` : '순서대로'
+      }};
+    }
+
+    // 즉시 전투
     const b = (await client.query(
       `INSERT INTO battles (cell_id, attacker_id, defender_id, atk_bet, def_bet, status)
        VALUES ($1,$2,$3,$4,$5,'active') RETURNING *`,
       [cell.id, attackerId, cell.owner_id, atkBet, cell.def_bet]
     )).rows[0];
 
-    // 마이크로 시작 보너스: 도전자/방어자가 이 위치 근처에 가진 다른 셀 개수
     const R = CONFIG.MICRO.PROXIMITY_RADIUS_M;
     const proximity = await countProximityCells(client, cell.lat, cell.lng, R, attackerId, cell.owner_id);
     return { battle: b, cell, attacker: atk, defender: def, proximity };
   });
+}
+
+// 큐의 다음 도전자를 꺼내 전투 시작. 호출자가 socket으로 알림 보내야 함.
+// 도전자가 더 이상 자격 안 되면(에너지 부족 등) 스킵하고 다음을 시도.
+export async function popNextChallenger(cellId) {
+  return tx(async (client) => {
+    const cell = (await client.query(`SELECT * FROM cells WHERE id=$1 FOR UPDATE`, [cellId])).rows[0];
+    if (!cell || !cell.owner_id) return null;
+    const tick = await getTick();
+    if (cell.rest_until && tick < cell.rest_until) return null; // 아직 휴식 중
+    const busy = (await client.query(
+      `SELECT 1 FROM battles WHERE cell_id=$1 AND status='active' LIMIT 1`, [cellId])).rowCount > 0;
+    if (busy) return null;
+
+    // 큐 순회 — 자격 못 되는 도전자 자동 제거
+    while (true) {
+      // 큐에서 다음 도전자 선정 — FIFO 또는 RANDOM (담합 방지)
+      // 랜덤이 기본: 친구끼리 가짜 도전으로 좋은 자리 선점 못 하게.
+      const order = CONFIG.MACRO.QUEUE_SELECTION === 'random' ? 'random()' : 'queued_at ASC';
+      const next = (await client.query(
+        `SELECT * FROM cell_queue WHERE cell_id=$1 ORDER BY ${order} LIMIT 1`, [cellId])).rows[0];
+      if (!next) return null;
+      const atk = (await client.query(`SELECT * FROM players WHERE id=$1 FOR UPDATE`, [next.challenger_id])).rows[0];
+      const bet = Number(next.atk_bet);
+      const minBet = Math.ceil(cell.def_bet * CONFIG.BETTING.CHALLENGE_MIN_RATIO);
+      // 도전자가 자격 잃었으면 스킵
+      if (!atk || !atk.alive || atk.energy < bet || bet < minBet) {
+        await client.query(`DELETE FROM cell_queue WHERE id=$1`, [next.id]);
+        continue;
+      }
+      // 전투 생성
+      const b = (await client.query(
+        `INSERT INTO battles (cell_id, attacker_id, defender_id, atk_bet, def_bet, status)
+         VALUES ($1,$2,$3,$4,$5,'active') RETURNING *`,
+        [cellId, next.challenger_id, cell.owner_id, bet, cell.def_bet]
+      )).rows[0];
+      await client.query(`DELETE FROM cell_queue WHERE id=$1`, [next.id]);
+      const def = (await client.query(`SELECT * FROM players WHERE id=$1`, [cell.owner_id])).rows[0];
+      const R = CONFIG.MICRO.PROXIMITY_RADIUS_M;
+      const proximity = await countProximityCells(client, Number(cell.lat), Number(cell.lng), R, next.challenger_id, cell.owner_id);
+      return { battle: b, cell, attacker: atk, defender: def, proximity, challengerId: next.challenger_id };
+    }
+  });
+}
+
+export async function cancelQueueEntry(cellId, challengerId) {
+  const r = await query(
+    `DELETE FROM cell_queue WHERE cell_id=$1 AND challenger_id=$2`, [cellId, challengerId]);
+  return r.rowCount > 0;
+}
+
+// 방어자가 짧은 휴식(60초)을 스킵하고 곧장 다음 도전자와 싸움. 장기 휴식은 스킵 불가.
+export async function skipRest(cellId, defenderId) {
+  return tx(async (client) => {
+    const cell = (await client.query(`SELECT * FROM cells WHERE id=$1 FOR UPDATE`, [cellId])).rows[0];
+    if (!cell) throw new Error('셀 없음');
+    if (cell.owner_id !== defenderId) throw new Error('소유자만 스킵 가능');
+    const tick = await getTick();
+    if (!cell.rest_until || tick >= Number(cell.rest_until)) return { skipped: false, reason: '이미 휴식 종료' };
+    const remaining = Number(cell.rest_until) - tick;
+    if (remaining > CONFIG.MACRO.DEFENDER_REST_TICKS) {
+      return { skipped: false, reason: '장기 강제 휴식은 스킵 불가' };
+    }
+    await client.query(`UPDATE cells SET rest_until=NULL WHERE id=$1`, [cellId]);
+    return { skipped: true };
+  });
+}
+
+// 휴식 끝났고 큐가 비어있지 않은 셀들을 찾아 다음 도전자 팝 — 호출자(서버 틱)가 사용.
+export async function processQueueTick() {
+  const tick = await getTick();
+  const rows = (await query(
+    `SELECT DISTINCT c.id
+     FROM cells c
+     JOIN cell_queue q ON q.cell_id = c.id
+     WHERE (c.rest_until IS NULL OR c.rest_until <= $1)
+       AND NOT EXISTS (SELECT 1 FROM battles b WHERE b.cell_id = c.id AND b.status='active')`,
+    [tick])).rows;
+  const popped = [];
+  for (const r of rows) {
+    try {
+      const res = await popNextChallenger(Number(r.id));
+      if (res) popped.push(res);
+    } catch (e) { /* 한 셀 실패가 전체를 막지 않게 */ }
+  }
+  return popped;
 }
 
 // 위치 (lat,lng) 반경 radius_m 안에 attackerId/defenderId가 각각 가진 셀 수
@@ -212,7 +334,49 @@ export async function resolveChallenge(battleId, opts = {}) {
 
     await client.query(`UPDATE battles SET status='done', winner=$1, ended_at=now() WHERE id=$2`,
       [result.winner, battleId]);
-    return { winner: result.winner, battleTime: result.t };
+
+    // 전투 종료 후 피로 누적 + 단계 휴식
+    // - 매 전투 후: 짧은 휴식 (60초, 큐는 누적)
+    // - 연속 N방어 후: 1시간 강제 휴식 (큐는 누적, 연속 카운터 리셋)
+    // - 하루 M방어 후: 8시간 강제 휴식 (큐 누적, 모두 리셋)
+    // 도전 성공(점유 이전)이면 카운터 리셋: 새 점유자의 셀이니까.
+    let consec, daily, dayStart;
+    if (result.winner === 'attacker') {
+      // 점유 이전 — 카운터 리셋
+      consec = 0; daily = 0; dayStart = null;
+    } else {
+      // 방어 성공 — 카운터 증가
+      // 하루 경계 (24시간) 지났으면 daily 리셋
+      const now = new Date();
+      const lastDayStart = cell.defenses_day_start ? new Date(cell.defenses_day_start) : null;
+      const dayElapsed = lastDayStart ? (now - lastDayStart) / 1000 / 3600 : 999;
+      if (!lastDayStart || dayElapsed >= 24) {
+        daily = 1; dayStart = now;
+      } else {
+        daily = (cell.defenses_today || 0) + 1; dayStart = lastDayStart;
+      }
+      consec = (cell.consec_defenses || 0) + 1;
+    }
+
+    const MAC = CONFIG.MACRO;
+    let restTicks = MAC.DEFENDER_REST_TICKS;
+    let restReason = 'short';
+    if (daily >= MAC.REST_FATIGUE_DAILY) {
+      restTicks = MAC.REST_FATIGUE_DAILY_TICKS;
+      restReason = 'daily_fatigue';
+      consec = 0; daily = 0; dayStart = null;  // 풀 리셋
+    } else if (consec >= MAC.REST_FATIGUE_CONSEC) {
+      restTicks = MAC.REST_FATIGUE_CONSEC_TICKS;
+      restReason = 'consec_fatigue';
+      consec = 0;  // 연속 카운터만 리셋
+    }
+    const restUntil = tick + restTicks;
+    await client.query(
+      `UPDATE cells SET rest_until=$1, consec_defenses=$2, defenses_today=$3, defenses_day_start=$4 WHERE id=$5`,
+      [restUntil, consec, daily, dayStart, cell.id]);
+
+    const restSec = restTicks * (MAC.SERVER_TICK_MS / 1000);
+    return { winner: result.winner, battleTime: result.t, restUntil, restSec, restReason, consec, daily };
   });
 }
 
@@ -229,7 +393,7 @@ export async function ecosystemTick(io) {
   await query(`
     UPDATE players p SET energy = energy + sub.inc
     FROM (
-      SELECT owner_id, COUNT(*) * $1 AS inc
+      SELECT owner_id, COUNT(*) * $1::real AS inc
       FROM cells WHERE owner_id IS NOT NULL GROUP BY owner_id
     ) sub
     WHERE p.id = sub.owner_id AND p.alive
@@ -237,7 +401,7 @@ export async function ecosystemTick(io) {
 
   // 2) 카르마 누적 (생존 + 영토)
   await query(`
-    UPDATE players p SET karma = karma + $1 + COALESCE(sub.cnt,0)*$2
+    UPDATE players p SET karma = karma + $1::real + COALESCE(sub.cnt,0) * $2::real
     FROM (SELECT owner_id, COUNT(*) cnt FROM cells WHERE owner_id IS NOT NULL GROUP BY owner_id) sub
     WHERE p.id = sub.owner_id AND p.alive
   `, [ECO.KARMA_SURVIVAL * 0.1, ECO.KARMA_TERRITORY * 0.01]);

@@ -62,6 +62,8 @@ input[type=text]{width:100%;padding:12px;border-radius:8px;border:1px solid var(
 .sheet .sub{font-size:11px;color:var(--dim);margin-bottom:14px;line-height:1.5;}
 .sheet .warn{font-size:11px;color:#ffb38a;background:rgba(255,140,80,0.10);
   border:1px solid rgba(255,140,80,0.35);border-radius:6px;padding:8px 10px;margin-bottom:12px;line-height:1.5;}
+.warn-inline{display:inline-block;font-size:11px;color:#ffd089;padding:4px 8px;
+  border:1px solid rgba(255,170,80,0.35);border-radius:4px;background:rgba(255,170,80,0.08);}
 .betrow,.slider-row{display:flex;align-items:center;gap:10px;margin:12px 0;}
 .betrow label,.slider-row label{font-size:11px;color:var(--dim);min-width:80px;}
 .slider-row span{font-weight:700;color:var(--gold);min-width:54px;text-align:right;}

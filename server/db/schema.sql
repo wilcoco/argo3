@@ -47,6 +47,12 @@ CREATE INDEX IF NOT EXISTS idx_cells_owner ON cells(owner_id);
 CREATE INDEX IF NOT EXISTS idx_cells_xy ON cells(cell_x, cell_y);
 CREATE INDEX IF NOT EXISTS idx_cells_tribe ON cells(tribe);
 
+-- 셀에 cooldown(휴식) + 피로 카운터 추가
+ALTER TABLE cells ADD COLUMN IF NOT EXISTS rest_until BIGINT;
+ALTER TABLE cells ADD COLUMN IF NOT EXISTS consec_defenses INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE cells ADD COLUMN IF NOT EXISTS defenses_today INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE cells ADD COLUMN IF NOT EXISTS defenses_day_start TIMESTAMPTZ;
+
 -- 도전(전투) 기록
 CREATE TABLE IF NOT EXISTS battles (
   id            BIGSERIAL PRIMARY KEY,
@@ -62,6 +68,17 @@ CREATE TABLE IF NOT EXISTS battles (
 );
 CREATE INDEX IF NOT EXISTS idx_battles_cell ON battles(cell_id);
 CREATE INDEX IF NOT EXISTS idx_battles_status ON battles(status);
+
+-- 도전 대기 큐 (FIFO). 한 셀에 같은 도전자는 하나만.
+CREATE TABLE IF NOT EXISTS cell_queue (
+  id            BIGSERIAL PRIMARY KEY,
+  cell_id       BIGINT NOT NULL REFERENCES cells(id) ON DELETE CASCADE,
+  challenger_id INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+  atk_bet       REAL NOT NULL,
+  queued_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (cell_id, challenger_id)
+);
+CREATE INDEX IF NOT EXISTS idx_queue_cell ON cell_queue(cell_id, queued_at);
 
 -- 종족 영혼 풀 (환생 영웅 연료) + 종족 통계
 CREATE TABLE IF NOT EXISTS tribes (

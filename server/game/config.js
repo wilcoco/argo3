@@ -28,6 +28,13 @@ export const CONFIG = {
     DENSITY_MIN: 0.3,          // 외로운 셀 최소 배율
     SERVER_TICK_MS: 5000,      // 매크로 서버 틱 주기 (5초 = 게임상 1시간 가정)
     COUNTER_EROSION: 0.04,     // 상성 경계 잠식 확률(틱당) — 압박만, 점유이전은 마이크로
+    DEFENDER_REST_TICKS: 12,   // 매 전투 후 짧은 휴식 (12틱 = 60초). 그동안 큐 누적, 방어자가 곧장 다음 수락 가능.
+    REST_FATIGUE_CONSEC: 5,    // 연속 N방어하면 강제 장기 휴식
+    REST_FATIGUE_CONSEC_TICKS: 720, // 강제 휴식 길이 (720틱 = 1시간)
+    REST_FATIGUE_DAILY: 10,    // 하루 N방어하면 강제 초장기 휴식
+    REST_FATIGUE_DAILY_TICKS: 5760, // 초장기 휴식 (5760틱 = 8시간)
+    QUEUE_SELECTION: 'random', // 'fifo' | 'random' (담합 방지 위해 랜덤 권장)
+    CHALLENGER_RESPONSE_SEC: 30, // 큐에서 차례 됐을 때 응답 대기. 미응답 시 다음으로.
   },
 
   // ---- 마이크로 (실시간 전투) ----
