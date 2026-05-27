@@ -4,7 +4,7 @@
 // ============================================================
 import { query, tx } from '../db/pool.js';
 import { CONFIG, tribeBeats, densityMult, maxBet } from './config.js';
-import { latLngToCell, cellToLatLng, cellNeighbors } from './geo.js';
+import { latLngToCell, cellToLatLng, cellNeighbors, haversineM } from './geo.js';
 import { simulateBattle } from './battle.js';
 
 const MAC = CONFIG.MACRO;
@@ -67,12 +67,22 @@ export async function getCellsInBounds(minLat, minLng, maxLat, maxLng) {
 
 // ---- 빈 땅 점유 ----
 // value = 영역 가치(=점유 비용). 클라이언트가 슬라이더로 정한 값.
-export async function claimCell(playerId, lat, lng, value) {
+// playerLoc = { lat, lng } 플레이어의 현재 GPS 위치 (있으면 1km 반경 강제)
+export async function claimCell(playerId, lat, lng, value, playerLoc) {
   const { cellX, cellY } = latLngToCell(lat, lng);
   // 서버 권위적으로 범위 클램프 — 클라이언트 변조 방지
   const v = Math.max(MAC.CLAIM_MIN_VALUE,
             Math.min(MAC.CLAIM_MAX_VALUE,
               Math.round(Number.isFinite(value) ? value : MAC.CLAIM_DEFAULT_VALUE)));
+  // GPS 반경 제약: 플레이어 현재 위치 기준 CLAIM_RADIUS_M 이내만 점유 가능
+  if (playerLoc && Number.isFinite(playerLoc.lat) && Number.isFinite(playerLoc.lng)) {
+    const dist = haversineM(playerLoc.lat, playerLoc.lng, lat, lng);
+    if (dist > MAC.CLAIM_RADIUS_M) {
+      const km = (MAC.CLAIM_RADIUS_M / 1000).toFixed(1);
+      const cur = (dist / 1000).toFixed(2);
+      throw new Error(`현재 위치에서 ${km}km 이내만 점유 가능 (현재 거리 ${cur}km)`);
+    }
+  }
   return tx(async (client) => {
     const p = (await client.query(`SELECT * FROM players WHERE id=$1 FOR UPDATE`, [playerId])).rows[0];
     if (!p) throw new Error('플레이어 없음');
@@ -122,8 +132,37 @@ export async function startChallenge(attackerId, cellX, cellY, atkBet) {
        VALUES ($1,$2,$3,$4,$5,'active') RETURNING *`,
       [cell.id, attackerId, cell.owner_id, atkBet, cell.def_bet]
     )).rows[0];
-    return { battle: b, cell, attacker: atk, defender: def };
+
+    // 마이크로 시작 보너스: 도전자/방어자가 이 위치 근처에 가진 다른 셀 개수
+    const R = CONFIG.MICRO.PROXIMITY_RADIUS_M;
+    const proximity = await countProximityCells(client, cell.lat, cell.lng, R, attackerId, cell.owner_id);
+    return { battle: b, cell, attacker: atk, defender: def, proximity };
   });
+}
+
+// 위치 (lat,lng) 반경 radius_m 안에 attackerId/defenderId가 각각 가진 셀 수
+// 현재 도전 중인 셀은 방어자 카운트에서 제외 (그건 전투의 무대)
+async function countProximityCells(client, lat, lng, radius_m, attackerId, defenderId) {
+  // 위경도 도(degree) 단위 대략 박스로 좁힌 뒤 정확히 haversine으로 필터
+  const dLat = radius_m / 111000;
+  const dLng = dLat / Math.cos((lat * Math.PI) / 180);
+  const rows = (await client.query(
+    `SELECT owner_id, lat, lng FROM cells
+     WHERE owner_id IN ($1,$2)
+       AND lat BETWEEN $3 AND $4 AND lng BETWEEN $5 AND $6`,
+    [attackerId, defenderId, lat - dLat, lat + dLat, lng - dLng, lng + dLng]
+  )).rows;
+  let atk = 0, def = 0;
+  for (const r of rows) {
+    const d = haversineM(lat, lng, Number(r.lat), Number(r.lng));
+    if (d > radius_m) continue;
+    if (r.owner_id === attackerId) atk++;
+    else if (r.owner_id === defenderId) def++;
+  }
+  // 방어자의 "이 셀 자체"는 제외 (lat/lng가 정확히 같으니 1 빼도 안전하지만,
+  // 위에서 BETWEEN 매칭으로 잡혔으면 카운트됐을 것. 방어자 본진은 별도 의미 가짐)
+  if (def > 0) def -= 1;
+  return { atk, def };
 }
 
 // ---- 도전 결과 판정 (서버 권위) ----

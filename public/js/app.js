@@ -13,6 +13,15 @@ let socket = null;
 let pending = null;     // 진행 중 도전 {battleId, cellX, cellY}
 
 const $ = (id) => document.getElementById(id);
+
+// 두 위경도 좌표 간 미터 거리 (Haversine)
+function haversineM(lat1, lng1, lat2, lng2) {
+  const R = 6371000, toRad = (d) => (d * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1), dLng = toRad(lng2 - lng1);
+  const a = Math.sin(dLat/2)**2 +
+            Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng/2)**2;
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(a)));
+}
 const show = (screenId) => {
   document.querySelectorAll('.screen').forEach((s) => s.classList.remove('active'));
   $(screenId).classList.add('active');
@@ -43,6 +52,8 @@ async function login() {
   } catch (e) { $('loginError').textContent = e.message; }
 }
 
+let myLoc = null;  // 내 현재 GPS 위치 {lat, lng, acc}
+
 function initGame() {
   show('macroScreen');
   updateWallet();
@@ -52,15 +63,29 @@ function initGame() {
     cellSizeM: CFG.MACRO.CELL_SIZE_M,
     tribeColors: CFG.TRIBE_COLORS,
     myId: me.id,
+    claimRadiusM: CFG.MACRO.CLAIM_RADIUS_M,
     onTapEmpty: openClaim,
     onTapCell: openCell,
   });
-  // 위치 권한 시도 → 실패 시 서울
+  // 위치 권한: 한 번 가져온 뒤 지속 추적
   if (navigator.geolocation) {
     navigator.geolocation.getCurrentPosition(
-      (pos) => { macro.setView(pos.coords.latitude, pos.coords.longitude); refreshCells(); },
+      (pos) => {
+        myLoc = { lat: pos.coords.latitude, lng: pos.coords.longitude, acc: pos.coords.accuracy };
+        macro.setView(myLoc.lat, myLoc.lng);
+        macro.setMyLoc(myLoc);
+        refreshCells();
+      },
       () => refreshCells(),
-      { timeout: 5000 }
+      { timeout: 5000, enableHighAccuracy: true }
+    );
+    navigator.geolocation.watchPosition(
+      (pos) => {
+        myLoc = { lat: pos.coords.latitude, lng: pos.coords.longitude, acc: pos.coords.accuracy };
+        macro.setMyLoc(myLoc);
+      },
+      () => {},
+      { enableHighAccuracy: true, maximumAge: 5000 }
     );
   } else refreshCells();
 
@@ -75,6 +100,13 @@ function initGame() {
   // 전투 인스턴스
   battle = new Battle($('battleCanvas'), CFG, { onEnd: onBattleEnd });
   $('ovBack').addEventListener('click', () => { show('macroScreen'); refreshCells(); refreshMe(); });
+
+  // 줌 버튼
+  $('zoomIn').addEventListener('click', () => { macro.zoomBy(+1); refreshCells(); });
+  $('zoomOut').addEventListener('click', () => { macro.zoomBy(-1); refreshCells(); });
+  $('zoomMe').addEventListener('click', () => {
+    if (myLoc) { macro.setView(myLoc.lat, myLoc.lng); refreshCells(); }
+  });
 
   setInterval(refreshCells, 8000);
   setInterval(refreshMe, 10000);
@@ -125,9 +157,23 @@ function openClaim(lat, lng) {
   // 가진 에너지를 넘지 않게 상한 추가 클램프
   const cap = Math.max(minV, Math.min(maxV, Math.floor(me.energy)));
   const initV = Math.max(minV, Math.min(cap, M.CLAIM_DEFAULT_VALUE));
+  // GPS 반경 사전 확인 (서버도 검증하지만 UX상 미리 알림)
+  let warn = '';
+  if (myLoc) {
+    const dist = haversineM(myLoc.lat, myLoc.lng, lat, lng);
+    if (dist > M.CLAIM_RADIUS_M) {
+      const km = (M.CLAIM_RADIUS_M / 1000).toFixed(1);
+      const cur = (dist / 1000).toFixed(2);
+      warn = `<div class="warn">⚠ 현재 위치에서 ${cur}km — ${km}km 이내만 점유 가능</div>`;
+    }
+  } else {
+    warn = `<div class="warn">⚠ GPS 미허용 — 위치 권한이 있어야 점유할 수 있습니다</div>`;
+  }
+  const blocked = !!warn;
   $('sheetBody').innerHTML = `
     <h3>빈 땅 점유 <span class="tag free">미점유</span></h3>
     <div class="sub">크게 점유할수록 더 많은 에너지가 들고, 영역 가치가 높아진다.</div>
+    ${warn}
     <div class="slider-row">
       <label>영역 가치 / 비용</label>
       <input type="range" id="claimSize" min="${minV}" max="${cap}" value="${initV}" step="1">
@@ -135,7 +181,7 @@ function openClaim(lat, lng) {
     </div>
     <div class="btnrow">
       <button class="btn ghost" id="cancelBtn">취소</button>
-      <button class="btn primary" id="claimBtn" ${me.energy<minV?'disabled':''}>점유</button>
+      <button class="btn primary" id="claimBtn" ${(blocked || me.energy<minV)?'disabled':''}>점유</button>
     </div>`;
   openSheet();
   const slider = $('claimSize'), label = $('claimSizeVal'), btn = $('claimBtn');
@@ -151,7 +197,10 @@ function openClaim(lat, lng) {
   btn.onclick = async () => {
     try {
       const value = Number(slider.value);
-      await api('/claim', { method: 'POST', body: { playerId: me.id, lat, lng, value } });
+      await api('/claim', { method: 'POST', body: {
+        playerId: me.id, lat, lng, value,
+        playerLat: myLoc?.lat, playerLng: myLoc?.lng,
+      }});
       closeSheet(); await refreshMe(); await refreshCells();
     } catch (e) { alert(e.message); }
   };
@@ -195,7 +244,8 @@ async function startChallenge(c, atkBet) {
   try {
     const result = await api('/challenge', { method: 'POST',
       body: { playerId: me.id, cellX: c.cell_x, cellY: c.cell_y, atkBet } });
-    pending = { battleId: result.battle.id, cell: c, atkBet, defBet: c.def_bet, mySide: 'atk' };
+    pending = { battleId: result.battle.id, cell: c, atkBet, defBet: c.def_bet, mySide: 'atk',
+                proximity: result.proximity };
     closeSheet();
     socket.emit('battle:join', result.battle.id);
     // 방어자에게 도전 알림 → 응답 대기
@@ -226,7 +276,7 @@ function showWaiting(c) {
 function beginVsAI() {
   const ov = $('overlay'); ov.classList.remove('show'); $('ovBack').style.display = '';
   battle.start(pending.atkBet, pending.defBet, pending.cell.username || '적 거점',
-    { mySide: 'atk', pvp: false });
+    { mySide: 'atk', pvp: false, proximity: pending.proximity });
 }
 
 // 양쪽: PvP 실시간 대전 시작
@@ -234,7 +284,8 @@ function beginPvP() {
   const ov = $('overlay'); ov.classList.remove('show'); $('ovBack').style.display = '';
   show('battleScreen');
   battle.start(pending.atkBet, pending.defBet, pending.regionName || pending.cell?.username || '전장',
-    { mySide: pending.mySide, pvp: true, socket, battleId: pending.battleId });
+    { mySide: pending.mySide, pvp: true, socket, battleId: pending.battleId,
+      proximity: pending.proximity });
 }
 
 // ---- 소켓 이벤트 바인딩 (initGame에서 호출) ----

@@ -15,9 +15,10 @@ export const CONFIG = {
   MACRO: {
     ZOOM: 14,                  // 매크로 지도 줌
     CELL_SIZE_M: 200,          // 한 영역 셀의 실제 크기 (미터, 대략)
-    CLAIM_MIN_VALUE: 20,       // 최소 영역 가치(=점유 비용 최저)
+    CLAIM_MIN_VALUE: 15,       // 최소 영역 가치(=점유 비용 최저)
     CLAIM_MAX_VALUE: 90,       // 최대 영역 가치(=점유 비용 최고)
-    CLAIM_DEFAULT_VALUE: 40,   // 슬라이더 초기값
+    CLAIM_DEFAULT_VALUE: 25,   // 슬라이더 초기값 (작게 시작 → 1km 안에 4~6개 점유 가능)
+    CLAIM_RADIUS_M: 1000,      // 현재 GPS 위치에서 점유 가능한 반경 (m)
     INCOME_PER_CELL: 0.6,      // 셀당 시간당 수입 (서버 틱 기준)
     CORE_BONUS: 2.0,           // 노른자(밀집지) 셀 수입 배율
     DENSITY_RADIUS: 3,         // 밀도 측정 반경 (셀)
@@ -43,6 +44,9 @@ export const CONFIG = {
     COUNTDOWN_SEC: 3,
     DEFENSE_WAIT_SEC: 15,      // 방어자 응답 대기 시간 (초). 미응답 시 AI 폴백.
     AI_STRENGTH: 0.6,          // 자동방어 AI 강도 (0~1, 진화챔피언 기반)
+    PROXIMITY_RADIUS_M: 800,   // 마이크로 시작 보너스 계산 반경 (이 안의 내 셀이 영향)
+    PROXIMITY_BONUS_PER: 0.10, // 셀당 시작 탑 크기 +10%
+    PROXIMITY_BONUS_MAX: 0.6,  // 최대 +60% (6셀 이상부터 캡)
     // 진화 챔피언 유전자 (자동방어 두뇌)
     CHAMPION: {
       towerSize: 17, aggression: 0.87, allyAvoid: 0.98,

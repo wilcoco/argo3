@@ -16,29 +16,103 @@ export class MacroMap {
     this.onTapCell = opts.onTapCell || (() => {});
     this.tribeColors = opts.tribeColors || ['#3ad1c8', '#ff5d73', '#ffc24d'];
     this.myId = opts.myId;
+    this.claimRadiusM = opts.claimRadiusM || 1000;
+    this.myLoc = null;          // {lat, lng, acc}
+    this.minZoom = opts.minZoom || 11;   // 더 멀리 — 약 30km 시야
+    this.maxZoom = opts.maxZoom || 18;   // 더 가깝게 — 골목 단위
     this._resize();
     window.addEventListener('resize', () => this._resize());
     canvas.addEventListener('click', (e) => this._onClick(e));
-    // 모바일 터치 보강 (iOS 사파리에서 click 누락 방지)
-    let touchStart = null;
+    this._bindGestures(canvas);
+    // 마우스 휠 줌 (데스크톱)
+    canvas.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      this._zoomAt(e.clientX, e.clientY, e.deltaY < 0 ? 1 : -1);
+    }, { passive: false });
+    this._raf();
+  }
+
+  // 핀치 줌 + 드래그 팬 + 탭 구분
+  _bindGestures(canvas) {
+    let touchStart = null;       // 1손가락 탭 추적
+    let dragLast = null;         // 1손가락 드래그 시작점
+    let dragged = false;         // 탭/드래그 구분용
+    let pinchPrev = null;        // 핀치 직전 두 손가락 거리·중점
+    const dist = (a, b) => Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+    const mid = (a, b) => ({ x: (a.clientX + b.clientX) / 2, y: (a.clientY + b.clientY) / 2 });
+
     canvas.addEventListener('touchstart', (e) => {
-      if (e.touches.length !== 1) { touchStart = null; return; }
-      const t = e.touches[0];
-      touchStart = { x: t.clientX, y: t.clientY, t: Date.now() };
+      if (e.touches.length === 1) {
+        const t = e.touches[0];
+        touchStart = { x: t.clientX, y: t.clientY, t: Date.now() };
+        dragLast = { x: t.clientX, y: t.clientY };
+        dragged = false;
+        pinchPrev = null;
+      } else if (e.touches.length === 2) {
+        pinchPrev = { d: dist(e.touches[0], e.touches[1]), m: mid(e.touches[0], e.touches[1]) };
+        touchStart = null; dragLast = null;
+      }
     }, { passive: true });
+
+    canvas.addEventListener('touchmove', (e) => {
+      if (e.touches.length === 2 && pinchPrev) {
+        e.preventDefault();
+        const d = dist(e.touches[0], e.touches[1]);
+        const m = mid(e.touches[0], e.touches[1]);
+        const ratio = d / pinchPrev.d;
+        // 일정 임계치 넘어가면 줌 한 단계 (정수 줌 레벨이라 매끄럽지 않지만 안정적)
+        if (ratio > 1.25) { this._zoomAt(m.x, m.y, +1); pinchPrev = { d, m }; }
+        else if (ratio < 0.8) { this._zoomAt(m.x, m.y, -1); pinchPrev = { d, m }; }
+      } else if (e.touches.length === 1 && dragLast) {
+        const t = e.touches[0];
+        const dx = t.clientX - dragLast.x, dy = t.clientY - dragLast.y;
+        if (Math.hypot(dx, dy) > 6) dragged = true;
+        if (dragged) {
+          e.preventDefault();
+          this._panBy(dx, dy);
+          dragLast = { x: t.clientX, y: t.clientY };
+        }
+      }
+    }, { passive: false });
+
     canvas.addEventListener('touchend', (e) => {
-      if (!touchStart) return;
+      if (pinchPrev && e.touches.length < 2) pinchPrev = null;
+      if (!touchStart || dragged) { touchStart = null; dragLast = null; dragged = false; return; }
       const t = e.changedTouches[0];
       const dx = t.clientX - touchStart.x, dy = t.clientY - touchStart.y;
       const dt = Date.now() - touchStart.t;
-      touchStart = null;
-      // 짧고 거의 움직임 없는 터치만 탭으로
+      touchStart = null; dragLast = null;
       if (dt < 500 && dx*dx + dy*dy < 100) {
         e.preventDefault();
         this._onClick({ clientX: t.clientX, clientY: t.clientY });
       }
     });
-    this._raf();
+  }
+
+  // 화면 좌표(clientX/Y)를 기준으로 줌 한 단계 (그 지점이 그대로 그 자리에 보이도록 view 보정)
+  _zoomAt(sx, sy, dir) {
+    const rect = this.canvas.getBoundingClientRect();
+    const x = sx - rect.left, y = sy - rect.top;
+    const before = this.screen2geo(x, y);
+    const nz = Math.max(this.minZoom, Math.min(this.maxZoom, this.zoom + dir));
+    if (nz === this.zoom) return;
+    this.zoom = nz;
+    const after = this.screen2geo(x, y);
+    this.view.lat += before.lat - after.lat;
+    this.view.lng += before.lng - after.lng;
+  }
+
+  // 캔버스 중앙 기준 줌 (버튼용)
+  zoomBy(dir) {
+    const nz = Math.max(this.minZoom, Math.min(this.maxZoom, this.zoom + dir));
+    if (nz !== this.zoom) this.zoom = nz;
+  }
+
+  _panBy(dxPx, dyPx) {
+    const a = this.screen2geo(this.W/2, this.H/2);
+    const b = this.screen2geo(this.W/2 - dxPx, this.H/2 - dyPx);
+    this.view.lat += b.lat - a.lat;
+    this.view.lng += b.lng - a.lng;
   }
   _resize() {
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -49,6 +123,15 @@ export class MacroMap {
   }
   setCells(cells) { this.cells = cells; }
   setView(lat, lng) { this.view = { lat, lng }; }
+  setMyLoc(loc) { this.myLoc = loc; }
+
+  // 미터 → 현재 줌의 픽셀 거리 (시야 위도 기준)
+  _metersToPx(meters) {
+    // Web Mercator: 1 픽셀 = (현재 위도의 미터/픽셀)
+    // 적도에서 zoom z의 픽셀당 미터 = 156543.03392 / 2^z
+    const mPerPx = (156543.03392 * Math.cos((this.view.lat * Math.PI) / 180)) / Math.pow(2, this.zoom);
+    return meters / mPerPx;
+  }
 
   // 좌표 변환
   _lng2tx(lng) { return (lng + 180) / 360 * Math.pow(2, this.zoom); }
@@ -139,6 +222,33 @@ export class MacroMap {
       ctx.fillStyle = color; ctx.font = 'bold 10px JetBrains Mono,monospace'; ctx.textAlign = 'center';
       ctx.fillText(c.username || '거점', p.x, p.y - radius - 5);
     }
+    this._drawMyLoc();
+  }
+
+  // 내 GPS 위치 + 점유 가능 반경(1km)
+  _drawMyLoc() {
+    if (!this.myLoc) return;
+    const ctx = this.ctx;
+    const p = this.geo2screen(this.myLoc.lat, this.myLoc.lng);
+    if (p.x < -200 || p.x > this.W+200 || p.y < -200 || p.y > this.H+200) return;
+    // 점유 가능 반경 원 (반투명, 점선)
+    const rPx = this._metersToPx(this.claimRadiusM);
+    if (rPx > 8) {
+      ctx.save();
+      ctx.beginPath(); ctx.arc(p.x, p.y, rPx, 0, Math.PI*2);
+      ctx.fillStyle = 'rgba(58, 209, 200, 0.06)'; ctx.fill();
+      ctx.strokeStyle = 'rgba(58, 209, 200, 0.55)'; ctx.lineWidth = 1.5;
+      ctx.setLineDash([6, 4]); ctx.stroke(); ctx.setLineDash([]);
+      ctx.restore();
+    }
+    // 내 위치 핀 (펄스)
+    const t = (Date.now() % 1600) / 1600;
+    const pulse = 8 + t * 14;
+    ctx.beginPath(); ctx.arc(p.x, p.y, pulse, 0, Math.PI*2);
+    ctx.fillStyle = `rgba(58, 209, 200, ${0.35 * (1-t)})`; ctx.fill();
+    ctx.beginPath(); ctx.arc(p.x, p.y, 6, 0, Math.PI*2);
+    ctx.fillStyle = '#3ad1c8'; ctx.fill();
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.stroke();
   }
   _alpha(hex, a) {
     const n = parseInt(hex.slice(1), 16);
