@@ -273,14 +273,23 @@ export class Battle {
     this.aiTimer = 0.4+(1-S)*1.6 + Math.random()*1.0;
     const ai=this.foeSide;  // AI가 조작하는 진영 = 상대
     const mine=this.towers.filter(t=>t.side===ai), foe=this.towers.filter(t=>t.side===this.mySide);
-    if(mine.length && foe.length && Math.random()<S*0.5){
-      const sh=mine.slice().sort((a,b)=>b.hp-a.hp)[0];
-      if(sh.hp/sh.maxHp>=champ.rangedThresh){ this._fireCluster(sh, foe.slice().sort((a,b)=>a.hp-b.hp)[0]); return; }
+    // 사격: 클러스터 크기가 큰 자기 탑을 선택해 화력 최대화
+    if(mine.length && foe.length && Math.random()<S*(champ.snipe ?? 0.5)){
+      let bestFrom = mine[0], bestSize = this._cluster(bestFrom).length;
+      for (const t of mine) {
+        const sz = this._cluster(t).length;
+        if (sz > bestSize) { bestFrom = t; bestSize = sz; }
+      }
+      if(bestFrom.hp/bestFrom.maxHp>=champ.rangedThresh){
+        this._fireCluster(bestFrom, foe.slice().sort((a,b)=>a.hp-b.hp)[0]);
+        return;
+      }
     }
     if(mine.length>=champ.maxTowers)return;
     const r = S>0.5 ? champ.towerSize+Math.random()*8 : 30+Math.random()*20;
     if(this.energy[ai]<r)return;
     let best=null,bs=-1e9; const cand=4+Math.round(S*8);
+    const clusterPref = champ.clusterPref ?? 0.5;
     for(let k=0;k<cand;k++){
       let bx,by;
       if(Math.random()<S){ bx=this.arena.cx+(Math.random()-0.5)*this.coreR*1.5; by=this.arena.cy+(Math.random()-0.5)*this.coreR*1.5; }
@@ -289,7 +298,14 @@ export class Battle {
       if(!this._inArena(bx,by))continue;
       let score=0; const dc=Math.hypot(bx-this.arena.cx,by-this.arena.cy);
       if(dc<=this.coreR)score+=100;else score+=Math.max(0,this.arena.r-dc)*0.1;
-      for(const o of mine){const dx=bx-o.x,dy=by-o.y,dist=Math.hypot(dx,dy);if(dist<r+o.radius)score-=S*(r+o.radius-dist)*3;}
+      // 클러스터 메커니즘 반영: 아군 겹침은 (생산↓페널티) + (클러스터화력↑보너스)
+      for(const o of mine){
+        const dx=bx-o.x,dy=by-o.y,dist=Math.hypot(dx,dy);
+        if(dist<r+o.radius){
+          score-=(champ.allyAvoid ?? S)*(r+o.radius-dist)*3;
+          score+=clusterPref*1.5;
+        }
+      }
       if(score>bs){bs=score;best={bx,by};}
     }
     if(best)this._build(best.bx,best.by,ai);

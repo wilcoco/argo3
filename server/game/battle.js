@@ -96,12 +96,51 @@ export function simulateBattle(atkBet, defBet, opts = {}) {
       }
   }
 
+  // 영역 겹친 아군 = 같은 클러스터. from 본인 포함.
+  function cluster(from) {
+    return towers.filter((t) =>
+      t.side === from.side &&
+      Math.hypot(t.x - from.x, t.y - from.y) <= t.radius + from.radius
+    );
+  }
+
+  // 단발 사격 (본인 HP 35% 소모, 거리 비례 감쇠)
+  function fire(from, to) {
+    if (!towers.includes(from) || !towers.includes(to)) return;
+    const cost = Math.floor(from.hp * M.RANGED_COST_RATIO);
+    if (cost < 3) return;
+    const d = Math.hypot(to.x - from.x, to.y - from.y);
+    const fall = Math.max(0.15, 1 - d / 700);
+    from.hp -= cost;
+    to.hp -= cost * fall;
+  }
+  // 클러스터 사격 (선택 탑 + 영역 겹친 아군이 동시 발사)
+  function fireCluster(from, to) {
+    for (const t of cluster(from)) fire(t, to);
+  }
+
   // 봇 행동 (도전자/방어자 공통, 강도로 차등)
   function act(side, strength) {
     const mine = sideTowers(side);
     const foe = sideTowers(side === 'atk' ? 'def' : 'atk');
     const e = side;
-    // 노른자 조준 + 작은탑 (챔피언 전략) — strength로 약화
+    // 사격 분기 — 챔피언의 snipe 비율로 사격 시도
+    if (mine.length && foe.length && Math.random() < strength * champ.snipe) {
+      // 클러스터가 가장 큰 자기 탑 선택 (화력 최대화)
+      let best = mine[0], bestSize = cluster(best).length;
+      for (const t of mine) {
+        const sz = cluster(t).length;
+        if (sz > bestSize) { best = t; bestSize = sz; }
+      }
+      // 사격 임계: 본인 HP가 충분할 때만
+      if (best.hp / best.maxHp >= champ.rangedThresh) {
+        // 목표: 체력 낮은 적 (마무리)
+        const target = foe.slice().sort((a, b) => a.hp - b.hp)[0];
+        fireCluster(best, target);
+        return;  // 한 행동 = 한 사격 또는 한 빌드
+      }
+    }
+    // 빌드 분기
     if (mine.length >= champ.maxTowers) return;
     const r = strength > 0.5 ? champ.towerSize + Math.random()*8 : 30 + Math.random()*20;
     if (energy[e] < tCost(r)) return;
@@ -123,7 +162,15 @@ export function simulateBattle(atkBet, defBet, opts = {}) {
       let score = 0;
       const dc = Math.hypot(x, y);
       if (dc <= coreR) score += 100; else score += Math.max(0, ARENA_R - dc) * 0.1;
-      for (const o of mine) { const dx=x-o.x, dy=y-o.y, dist=Math.hypot(dx,dy); if (dist < r+o.radius) score -= strength*(r+o.radius-dist)*3; }
+      // 아군 겹침 — allyAvoid가 페널티 강도. 새 규칙(클러스터 화력)에선 약하게.
+      // 두 효과 동시: 약한 페널티(생산↓) + 약한 보너스(클러스터 잠재력↑)
+      for (const o of mine) {
+        const dx = x-o.x, dy = y-o.y, dist = Math.hypot(dx, dy);
+        if (dist < r+o.radius) {
+          score -= (champ.allyAvoid ?? strength) * (r+o.radius-dist) * 3;
+          score += champ.clusterPref * 1.5; // 클러스터링 보너스 (새 챔피언 유전자)
+        }
+      }
       if (score > bestScore) { bestScore = score; best = { x, y }; }
     }
     if (best) addTower(side, best.x, best.y, r);

@@ -54,10 +54,16 @@ export const CONFIG = {
     PROXIMITY_RADIUS_M: 800,   // 마이크로 시작 보너스 계산 반경 (이 안의 내 셀이 영향)
     PROXIMITY_BONUS_PER: 0.10, // 셀당 시작 탑 크기 +10%
     PROXIMITY_BONUS_MAX: 0.6,  // 최대 +60% (6셀 이상부터 캡)
-    // 진화 챔피언 유전자 (자동방어 두뇌)
+    // 진화 챔피언 유전자 (자동방어 두뇌) — 클러스터 사격 메커니즘에 맞춰 갱신
     CHAMPION: {
-      towerSize: 17, aggression: 0.87, allyAvoid: 0.98,
-      enemySeek: 0.06, rangedThresh: 0.82, snipe: 0.36, maxTowers: 8
+      towerSize: 17,         // 작은 탑 다수 → 클러스터 화력 극대화
+      aggression: 0.87,
+      allyAvoid: 0.20,       // 겹침 회피 약화 — 클러스터링 허용
+      enemySeek: 0.06,
+      rangedThresh: 0.75,    // HP 75% 이상이면 사격 (빈번)
+      snipe: 0.55,           // 사격 빈도 ↑
+      maxTowers: 14,         // 작은 탑 많이
+      clusterPref: 1.2,      // 클러스터 선호도 (새 유전자) — 겹침 시 보너스
     },
   },
 
