@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>BACTERIA WAR</title>
-<link rel="stylesheet" href="/css/style.css?v=8">
+<link rel="stylesheet" href="/css/style.css?v=9">
 </head>
 <body>
 <div id="app">
@@ -52,11 +52,15 @@
       <div class="side en"><div class="lbl">ENEMY</div><div class="val" id="enE">0</div></div>
     </div>
     <div class="bctrl">
-      <div class="modehint" id="modeHint">중앙 노른자를 차지하라</div>
+      <div class="modehint" id="modeHint">탭하여 건설 위치 정하기</div>
       <div class="sizectrl">
         <span class="l">탑 크기</span>
         <input type="range" id="sizeSlider" min="15" max="70" value="25">
-        <span class="sizecost" id="sizeCost">비용 25</span>
+        <span class="sizecost" id="sizeCost">비용 ⚡25</span>
+      </div>
+      <div class="placebtns">
+        <button class="btn ghost" id="placeCancel" style="display:none">취소</button>
+        <button class="btn primary" id="placeConfirm" style="display:none">건설</button>
       </div>
     </div>
     <div class="countdown" id="countdown"></div>
@@ -81,6 +85,6 @@
 </div>
 
 <script src="/socket.io/socket.io.js"></script>
-<script type="module" src="/js/app.js?v=8"></script>
+<script type="module" src="/js/app.js?v=9"></script>
 </body>
 </html>

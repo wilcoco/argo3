@@ -11,17 +11,78 @@ export class Battle {
     this.colors = { atk: { s:'#3ad1c8', f:'rgba(58,209,200,0.14)', rgb:'58,209,200' },
                     def: { s:'#ff5d73', f:'rgba(255,93,115,0.14)', rgb:'255,93,115' } };
     this.sizeSlider = document.getElementById('sizeSlider');
-    this.sizeSlider.oninput = () => { this.selSize = +this.sizeSlider.value; };
+    this.sizeSlider.oninput = () => {
+      this.selSize = +this.sizeSlider.value;
+      this._updateSizeCost();
+    };
+    // 건설 확정/취소 버튼 (HTML에 추가됨)
+    const confirmBtn = document.getElementById('placeConfirm');
+    const cancelBtn = document.getElementById('placeCancel');
+    if (confirmBtn) confirmBtn.addEventListener('click', () => this._confirmPlace());
+    if (cancelBtn) cancelBtn.addEventListener('click', () => this._cancelPlace());
     canvas.addEventListener('click', (e) => this._onClick(e));
+    // 터치 보강 (모바일 — 매크로 지도와 동일 패턴)
+    let touchStart = null;
+    canvas.addEventListener('touchstart', (e) => {
+      if (e.touches.length !== 1) { touchStart = null; return; }
+      const t = e.touches[0];
+      touchStart = { x: t.clientX, y: t.clientY, t: Date.now() };
+    }, { passive: true });
+    canvas.addEventListener('touchend', (e) => {
+      if (!touchStart) return;
+      const t = e.changedTouches[0];
+      const dx = t.clientX - touchStart.x, dy = t.clientY - touchStart.y;
+      const dt = Date.now() - touchStart.t;
+      touchStart = null;
+      if (dt < 500 && dx*dx + dy*dy < 100) {
+        e.preventDefault();
+        this._onClick({ clientX: t.clientX, clientY: t.clientY });
+      }
+    });
+  }
+
+  _updateSizeCost() {
+    const c = document.getElementById('sizeCost');
+    const cfm = document.getElementById('placeConfirm');
+    const have = this.energy ? Math.floor(this.energy[this.mySide] || 0) : 0;
+    const enough = have >= this.selSize;
+    if (c) {
+      c.textContent = this.pendingPlace
+        ? (enough ? `여기 건설 ⚡${this.selSize}` : `에너지 부족 (${have}/${this.selSize})`)
+        : `비용 ⚡${this.selSize}`;
+      c.style.color = enough ? '' : '#ff8a96';
+    }
+    if (cfm) cfm.disabled = !enough;
+  }
+  _showPlacementUI(on) {
+    const cfm = document.getElementById('placeConfirm');
+    const cnl = document.getElementById('placeCancel');
+    if (cfm) cfm.style.display = on ? '' : 'none';
+    if (cnl) cnl.style.display = on ? '' : 'none';
+  }
+  _cancelPlace() {
+    this.pendingPlace = null;
+    this._showPlacementUI(false);
+    this._updateSizeCost();
+    const hint = document.getElementById('modeHint');
+    if (hint) hint.textContent = '탭하여 건설 위치 정하기';
+  }
+  _confirmPlace() {
+    if (!this.pendingPlace) return;
+    const ok = this._build(this.pendingPlace.x, this.pendingPlace.y, this.mySide);
+    if (ok) this._cancelPlace();
   }
 
   start(atkBet, defBet, regionName, battleOpts = {}) {
     const M = this.cfg.MICRO;
     this._resize();
     this.towers = []; this.proj = []; this.fx = []; this.nextId = 0; this.selTower = null;
+    this.pendingPlace = null;       // {x, y} 건설 후보 위치 (확정 전)
     this.energy = { atk: atkBet, def: defBet };
     this.rate = { atk: 0, def: 0 };
     this.selSize = 25; this.sizeSlider.value = 25;
+    this._showPlacementUI(false);
+    this._updateSizeCost();
     this.running = false;
     this.aiTimer = 0;
     // 내가 조작하는 진영. 도전자=atk, 방어자=def. 기본 atk(기존 호환)
@@ -245,6 +306,8 @@ export class Battle {
     // HUD — 내 진영/상대 진영 기준
     document.getElementById('meE').textContent=Math.floor(this.energy[this.mySide]);
     document.getElementById('enE').textContent=Math.floor(this.energy[this.foeSide]);
+    // 펜딩 상태일 때 에너지 변화 따라 비용/버튼 갱신
+    if (this.pendingPlace) this._updateSizeCost();
     const c=this.selSize, el=document.getElementById('sizeCost');
     el.textContent='비용 '+c;
     // 승패 (attacker/defender 절대 기준 유지 — 서버와 일치)
@@ -297,6 +360,28 @@ export class Battle {
     for(const f of this.fx){const a=f.life/f.max;
       ctx.beginPath();ctx.arc(f.x,f.y,(f.big?14:6)*(1.4-a),0,Math.PI*2);
       ctx.fillStyle=`rgba(255,255,255,${a*0.5})`;ctx.fill();}
+    // 건설 후보 위치 미리보기
+    if(this.pendingPlace){
+      const myCol=this._colorOf(this.mySide);
+      const t=(performance.now()%1200)/1200;
+      const pulse=this.selSize*(1+t*0.05);
+      ctx.save();
+      // 점선 윤곽 (반경 = 현재 선택 크기)
+      ctx.setLineDash([6,5]);
+      ctx.beginPath();ctx.arc(this.pendingPlace.x,this.pendingPlace.y,pulse,0,Math.PI*2);
+      ctx.strokeStyle=myCol.s;ctx.lineWidth=2;ctx.stroke();
+      ctx.setLineDash([]);
+      // 채움 반투명
+      ctx.beginPath();ctx.arc(this.pendingPlace.x,this.pendingPlace.y,this.selSize,0,Math.PI*2);
+      ctx.fillStyle=`rgba(${myCol.rgb},${0.10+0.08*(1-t)})`;ctx.fill();
+      // 중심 십자
+      ctx.strokeStyle='#fff';ctx.lineWidth=1.5;
+      ctx.beginPath();
+      ctx.moveTo(this.pendingPlace.x-6,this.pendingPlace.y);ctx.lineTo(this.pendingPlace.x+6,this.pendingPlace.y);
+      ctx.moveTo(this.pendingPlace.x,this.pendingPlace.y-6);ctx.lineTo(this.pendingPlace.x,this.pendingPlace.y+6);
+      ctx.stroke();
+      ctx.restore();
+    }
   }
 
   _loop(ts){
@@ -313,13 +398,24 @@ export class Battle {
     const hit=this._towerAt(x,y);
     const hint=document.getElementById('modeHint');
     const ME=this.mySide, FOE=this.foeSide;
+    // ── 모드 1: 내 탑 선택됨 → 적 탑 탭으로 사격, 다른 내 탑 탭으로 선택 전환, 그 외는 무시
     if(this.selTower){
       if(hit&&hit.side===FOE){this._fire(this.selTower,hit);this.selTower=null;hint.textContent='중앙 노른자를 차지하라';return;}
       if(hit&&hit.side===ME){this.selTower=hit;return;}
-      this.selTower=null;this._build(x,y,ME);hint.textContent='중앙 노른자를 차지하라';return;
+      this.selTower=null;hint.textContent='중앙 노른자를 차지하라';return;
     }
-    if(hit&&hit.side===ME){this.selTower=hit;hint.textContent='적 탑 탭=장거리 공격';return;}
-    this._build(x,y,ME);
+    // ── 모드 2: 내 탑 탭 → 사격 모드 진입
+    if(hit&&hit.side===ME){
+      // 건설 후보 있었으면 취소 (배타적)
+      if(this.pendingPlace) this._cancelPlace();
+      this.selTower=hit;hint.textContent='적 탑 탭=장거리 공격';return;
+    }
+    // ── 모드 3: 빈 곳 탭 → 건설 후보 위치 표시 (확정은 버튼)
+    if(!this._inArena(x,y)){ this.outsideFlash=performance.now(); return; }
+    this.pendingPlace={x,y};
+    this._showPlacementUI(true);
+    this._updateSizeCost();
+    hint.textContent='크기 정하고 [건설] 누르기 — 다른 곳 탭으로 위치 이동';
   }
 
   _end(winner){
