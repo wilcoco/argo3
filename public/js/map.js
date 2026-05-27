@@ -133,6 +133,16 @@ export class MacroMap {
     return meters / mPerPx;
   }
 
+  // 셀의 화면상 픽셀 반경 — 줌과 함께 스케일됨.
+  // 물리적 영역(미터) 기준으로 크기 계산. value가 크면 살짝 더 크게.
+  // 너무 작으면 탭 가능하게 최소값 보장.
+  _cellRadiusPx(c) {
+    const baseMeters = (this.cellSizeM || 200) * 0.5;       // 100m (반경)
+    const valueScale = Math.sqrt((c.value || 40) / 40);     // 0.61× ~ 1.5×
+    const px = this._metersToPx(baseMeters * valueScale);
+    return Math.max(8, px);                                  // 줌 아웃 시 점으로
+  }
+
   // 좌표 변환
   _lng2tx(lng) { return (lng + 180) / 360 * Math.pow(2, this.zoom); }
   _lat2ty(lat) { return (1 - Math.log(Math.tan(lat*Math.PI/180) + 1/Math.cos(lat*Math.PI/180)) / Math.PI) / 2 * Math.pow(2, this.zoom); }
@@ -210,7 +220,7 @@ export class MacroMap {
       if (p.x < -60 || p.x > this.W+60 || p.y < -60 || p.y > this.H+60) continue;
       const mine = c.owner_id === this.myId;
       const color = c.tribe != null ? this.tribeColors[c.tribe] : '#3a4859';
-      const radius = 18 + Math.sqrt(c.value || 40) * 1.5;
+      const radius = this._cellRadiusPx(c);
       ctx.beginPath(); ctx.arc(p.x, p.y, radius, 0, Math.PI*2);
       ctx.fillStyle = this._alpha(color, 0.16); ctx.fill();
       ctx.lineWidth = mine ? 3 : 1.6;
@@ -258,11 +268,11 @@ export class MacroMap {
   _onClick(e) {
     const r = this.canvas.getBoundingClientRect();
     const x = e.clientX - r.left, y = e.clientY - r.top;
-    // 셀 히트 테스트
+    // 셀 히트 테스트 — 렌더와 동일한 줌-인식 반경 사용
     for (const c of this.cells) {
       if (c.lat == null) continue;
       const p = this.geo2screen(Number(c.lat), Number(c.lng));
-      const radius = 18 + Math.sqrt(c.value || 40) * 1.5;
+      const radius = this._cellRadiusPx(c);
       if ((x-p.x)**2 + (y-p.y)**2 <= radius*radius) { this.onTapCell(c); return; }
     }
     const g = this.screen2geo(x, y);
