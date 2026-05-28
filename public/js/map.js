@@ -124,6 +124,16 @@ export class MacroMap {
   setCells(cells) { this.cells = cells; }
   setView(lat, lng) { this.view = { lat, lng }; }
   setMyLoc(loc) { this.myLoc = loc; }
+  setPreviewCell(p) { this.previewCell = p; } // {lat, lng, value} or null
+
+  // 위경도 → 셀 중심 위경도 (서버 geo.js와 동일 공식, 그리드 양자화 미리보기용)
+  snapToCell(lat, lng) {
+    const cellDeg = (this.cellSizeM || 200) / 111000;
+    const cellY = Math.floor(lat / cellDeg);
+    const lngDeg = cellDeg / Math.cos((lat * Math.PI) / 180);
+    const cellX = Math.floor(lng / lngDeg);
+    return { lat: (cellY + 0.5) * cellDeg, lng: (cellX + 0.5) * lngDeg, cellX, cellY };
+  }
 
   // 미터 → 현재 줌의 픽셀 거리 (시야 위도 기준)
   _metersToPx(meters) {
@@ -233,6 +243,33 @@ export class MacroMap {
       ctx.fillText(c.username || '거점', p.x, p.y - radius - 5);
     }
     this._drawMyLoc();
+    this._drawPreviewCell();
+  }
+
+  // 점유 시트 열려 있을 때 — 그리드 스냅된 셀이 어디 생길지 미리 표시
+  _drawPreviewCell() {
+    if (!this.previewCell) return;
+    const c = this.previewCell;
+    const p = this.geo2screen(c.lat, c.lng);
+    if (p.x < -200 || p.x > this.W+200) return;
+    const r = this._cellRadiusPx({ value: c.value || 40 });
+    const ctx = this.ctx;
+    ctx.save();
+    // 펄스
+    const t = (Date.now() % 1200) / 1200;
+    ctx.beginPath(); ctx.arc(p.x, p.y, r * (1 + t * 0.08), 0, Math.PI*2);
+    ctx.fillStyle = `rgba(255,255,255,${0.05 + 0.06*(1-t)})`; ctx.fill();
+    // 점선 외곽 + 중심 십자
+    ctx.setLineDash([6, 4]);
+    ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI*2);
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(p.x-7, p.y); ctx.lineTo(p.x+7, p.y);
+    ctx.moveTo(p.x, p.y-7); ctx.lineTo(p.x, p.y+7);
+    ctx.stroke();
+    ctx.restore();
   }
 
   // 내 GPS 위치 + 점유 가능 반경(1km)

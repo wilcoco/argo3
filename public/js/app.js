@@ -157,10 +157,14 @@ function openClaim(lat, lng) {
   // 가진 에너지를 넘지 않게 상한 추가 클램프
   const cap = Math.max(minV, Math.min(maxV, Math.floor(me.energy)));
   const initV = Math.max(minV, Math.min(cap, M.CLAIM_DEFAULT_VALUE));
-  // GPS 반경 사전 확인 (서버도 검증하지만 UX상 미리 알림)
+  // 200m 그리드 스냅 미리보기 — 탭 지점이 어느 셀로 들어갈지 시각화
+  const snap = macro.snapToCell(lat, lng);
+  macro.setPreviewCell({ lat: snap.lat, lng: snap.lng, value: initV });
+  const dxM = haversineM(lat, lng, snap.lat, snap.lng);
+  // GPS 반경 사전 확인 (서버도 검증하지만 UX상 미리 알림) — 스냅된 셀 중심 기준
   let warn = '';
   if (myLoc) {
-    const dist = haversineM(myLoc.lat, myLoc.lng, lat, lng);
+    const dist = haversineM(myLoc.lat, myLoc.lng, snap.lat, snap.lng);
     if (dist > M.CLAIM_RADIUS_M) {
       const km = (M.CLAIM_RADIUS_M / 1000).toFixed(1);
       const cur = (dist / 1000).toFixed(2);
@@ -172,7 +176,9 @@ function openClaim(lat, lng) {
   const blocked = !!warn;
   $('sheetBody').innerHTML = `
     <h3>빈 땅 점유 <span class="tag free">미점유</span></h3>
-    <div class="sub">크게 점유할수록 더 많은 에너지가 들고, 영역 가치가 높아진다.</div>
+    <div class="sub">탭한 지점은 가까운 200m 그리드 칸에 스냅됩니다.
+      ${dxM > 30 ? `<br><span class="dim">(스냅 ${Math.round(dxM)}m — 지도의 흰 점선 원이 실제 위치)</span>` : ''}
+    </div>
     ${warn}
     <div class="slider-row">
       <label>영역 가치 / 비용</label>
@@ -190,19 +196,26 @@ function openClaim(lat, lng) {
     label.textContent = `⚡${v}`;
     btn.textContent = `점유 (⚡${v})`;
     btn.disabled = me.energy < v;
+    // 미리보기 원 크기도 슬라이더와 함께
+    macro.setPreviewCell({ lat: snap.lat, lng: snap.lng, value: v });
   };
   update();
   slider.addEventListener('input', update);
-  $('cancelBtn').onclick = closeSheet;
+  const cleanup = () => { macro.setPreviewCell(null); };
+  $('cancelBtn').onclick = () => { cleanup(); closeSheet(); };
   btn.onclick = async () => {
     try {
       const value = Number(slider.value);
+      // 스냅된 좌표를 보내 — 탭 지점과 무관하게 cell 중심으로 정확히
       await api('/claim', { method: 'POST', body: {
-        playerId: me.id, lat, lng, value,
+        playerId: me.id, lat: snap.lat, lng: snap.lng, value,
         playerLat: myLoc?.lat, playerLng: myLoc?.lng,
       }});
-      closeSheet(); await refreshMe(); await refreshCells();
-    } catch (e) { alert(e.message); }
+      cleanup(); closeSheet(); await refreshMe(); await refreshCells();
+    } catch (e) {
+      alert(e.message);
+      if (/이미 점유|에너지|위치/.test(e.message || '')) { cleanup(); closeSheet(); refreshCells(); }
+    }
   };
 }
 
@@ -492,4 +505,8 @@ async function onBattleEnd(clientWinner) {
 
 // ---- 시트 ----
 function openSheet() { $('sheet').classList.add('open'); }
-function closeSheet() { $('sheet').classList.remove('open'); }
+function closeSheet() {
+  $('sheet').classList.remove('open');
+  // 시트 닫힐 때 점유 미리보기도 항상 제거 (다른 경로로 닫히는 경우 대비)
+  if (macro && macro.setPreviewCell) macro.setPreviewCell(null);
+}
