@@ -33,14 +33,13 @@ export async function createPlayer(username) {
   const tribe = candidates[Math.floor(Math.random() * candidates.length)];
 
   const tick = await getTick();
-  const lifespan = ECO.LIFE_MIN + Math.random() * (ECO.LIFE_MAX - ECO.LIFE_MIN);
-
+  // 자연사 제거 — lifespan NULL (수명 무한)
   const r = await query(
     `INSERT INTO players (username, tribe, energy, born_tick, lifespan)
-     VALUES ($1, $2, $3, $4, $5)
+     VALUES ($1, $2, $3, $4, NULL)
      ON CONFLICT (username) DO UPDATE SET last_seen = now()
      RETURNING *`,
-    [username, tribe, CONFIG.START_ENERGY, tick, Math.round(lifespan)]
+    [username, tribe, CONFIG.START_ENERGY, tick]
   );
   return r.rows[0];
 }
@@ -66,16 +65,22 @@ export async function getCellsInBounds(minLat, minLng, maxLat, maxLng) {
   return r.rows;
 }
 
+// 셀 가치 → 물리 반경 (m)
+function cellRadiusM(value) {
+  return MAC.CELL_PHYSICAL_BASE_M * Math.sqrt((value || 40) / 40);
+}
+
 // ---- 빈 땅 점유 ----
-// value = 영역 가치(=점유 비용). 클라이언트가 슬라이더로 정한 값.
+// 자유 배치: lat/lng 그대로 저장 (그리드 스냅 없음).
+// 자기 셀과 겹침 OK (클러스터 형성), 적 셀과 너무 가까우면 도전 안내 응답.
+// value = 영역 가치(=점유 비용 = 물리 반경 기준)
 // playerLoc = { lat, lng } 플레이어의 현재 GPS 위치 (있으면 1km 반경 강제)
 export async function claimCell(playerId, lat, lng, value, playerLoc) {
-  const { cellX, cellY } = latLngToCell(lat, lng);
-  // 서버 권위적으로 범위 클램프 — 클라이언트 변조 방지
+  // 서버 권위적으로 범위 클램프
   const v = Math.max(MAC.CLAIM_MIN_VALUE,
             Math.min(MAC.CLAIM_MAX_VALUE,
               Math.round(Number.isFinite(value) ? value : MAC.CLAIM_DEFAULT_VALUE)));
-  // GPS 반경 제약: 플레이어 현재 위치 기준 CLAIM_RADIUS_M 이내만 점유 가능
+  // GPS 반경 제약
   if (playerLoc && Number.isFinite(playerLoc.lat) && Number.isFinite(playerLoc.lng)) {
     const dist = haversineM(playerLoc.lat, playerLoc.lng, lat, lng);
     if (dist > MAC.CLAIM_RADIUS_M) {
@@ -89,29 +94,71 @@ export async function claimCell(playerId, lat, lng, value, playerLoc) {
     if (!p) throw new Error('플레이어 없음');
     if (p.energy < v) throw new Error('에너지 부족');
 
-    const existing = (await client.query(`SELECT * FROM cells WHERE cell_x=$1 AND cell_y=$2`, [cellX, cellY])).rows[0];
-    if (existing && existing.owner_id) throw new Error('이미 점유된 영역');
+    // 적 셀과 충돌 검사: 새 셀 물리 반경 + 적 셀 물리 반경 + 마진(ENEMY_CHALLENGE_DIST_M) 이내면
+    // → 점유 대신 *도전 제안* (전선 형성)
+    const newR = cellRadiusM(v);
+    const margin = MAC.ENEMY_CHALLENGE_DIST_M || 0;
+    // 박스 1차 필터 → haversine 정밀
+    const searchM = newR + (MAC.CELL_PHYSICAL_BASE_M * Math.sqrt(MAC.CLAIM_MAX_VALUE/40)) + margin;
+    const dLat = searchM / 111000;
+    const dLng = dLat / Math.cos((lat * Math.PI) / 180);
+    const nearby = (await client.query(
+      `SELECT id, owner_id, value, lat, lng FROM cells
+       WHERE owner_id IS NOT NULL
+         AND lat BETWEEN $1 AND $2 AND lng BETWEEN $3 AND $4`,
+      [lat - dLat, lat + dLat, lng - dLng, lng + dLng]
+    )).rows;
+    for (const c of nearby) {
+      if (c.owner_id === playerId) continue; // 자기 셀과는 겹쳐도 OK (클러스터)
+      const d = haversineM(lat, lng, Number(c.lat), Number(c.lng));
+      const enemyR = cellRadiusM(Number(c.value));
+      if (d < newR + enemyR + margin) {
+        // 충돌 → 점유는 하지 않고 도전 안내
+        return {
+          challengeSuggested: {
+            cellId: Number(c.id),
+            ownerId: c.owner_id,
+            lat: Number(c.lat),
+            lng: Number(c.lng),
+            value: Number(c.value),
+            distanceM: d,
+          },
+        };
+      }
+    }
 
-    // 영역 가치에 비례해 기본 방어 베팅도 책정 (대략 가치의 절반)
+    // 점유 진행 — 자유 배치 (lat/lng 그대로). cell_x/cell_y는 spatial hint로만.
+    const { cellX, cellY } = latLngToCell(lat, lng);
     const defBet = Math.round(v * 0.5);
-    const center = cellToLatLng(cellX, cellY);
-    await client.query(
+    const ins = await client.query(
       `INSERT INTO cells (cell_x, cell_y, owner_id, tribe, value, def_bet, lat, lng)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-       ON CONFLICT (cell_x, cell_y) DO UPDATE SET owner_id=$3, tribe=$4, value=$5, def_bet=$6`,
-      [cellX, cellY, playerId, p.tribe, v, defBet, center.lat, center.lng]
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
+      [cellX, cellY, playerId, p.tribe, v, defBet, lat, lng]
     );
-    await client.query(`UPDATE players SET energy = energy - $1 WHERE id=$2`, [v, playerId]);
-    return { cellX, cellY, value: v, ...center };
+    // 에너지 차감 + 저장 상한 LEAST cap
+    await client.query(
+      `UPDATE players SET energy = LEAST(energy - $1, $2) WHERE id=$3`,
+      [v, MAC.MAX_ENERGY, playerId]
+    );
+    return { cellId: Number(ins.rows[0].id), cellX, cellY, value: v, lat, lng };
   });
 }
 
 // ---- 도전(전투) 시작 ----
 // 셀이 한가하면 즉시 전투, 다른 전투 중이거나 휴식 중이면 큐에 등록.
-// 반환: { battle, cell, attacker, defender, proximity }  OR  { queued: {position, queueLen, restRemainingSec} }
-export async function startChallenge(attackerId, cellX, cellY, atkBet) {
+// target = { cellId } 또는 { cellX, cellY } — 자유 배치 이후엔 cellId 권장.
+export async function startChallenge(attackerId, target, atkBet) {
   return tx(async (client) => {
-    const cell = (await client.query(`SELECT * FROM cells WHERE cell_x=$1 AND cell_y=$2 FOR UPDATE`, [cellX, cellY])).rows[0];
+    let cell;
+    if (target && target.cellId != null) {
+      cell = (await client.query(`SELECT * FROM cells WHERE id=$1 FOR UPDATE`, [Number(target.cellId)])).rows[0];
+    } else {
+      // 레거시 cellX/cellY 호환 — 가장 가까운 셀 1개
+      cell = (await client.query(
+        `SELECT * FROM cells WHERE cell_x=$1 AND cell_y=$2 AND owner_id IS NOT NULL
+         ORDER BY id LIMIT 1 FOR UPDATE`,
+        [Number(target.cellX), Number(target.cellY)])).rows[0];
+    }
     if (!cell || !cell.owner_id) throw new Error('점유되지 않은 영역');
     if (cell.owner_id === attackerId) throw new Error('자기 영역');
 
@@ -311,8 +358,9 @@ export async function resolveChallenge(battleId, opts = {}) {
         `UPDATE cells SET owner_id=$1, tribe=$2, def_bet=$3, def_wins=0, exempt_until=NULL WHERE id=$4`,
         [b.attacker_id, atk.tribe, Math.min(cell.value, b.atk_bet), cell.id]
       );
-      await client.query(`UPDATE players SET energy = energy + $1, wins = wins + 1, combat_wins = combat_wins + 1, karma = karma + $2 WHERE id=$3`,
-        [b.def_bet, ECO.KARMA_COMBAT_WIN, b.attacker_id]);
+      await client.query(`UPDATE players SET energy = LEAST(energy + $1, $4::real),
+        wins = wins + 1, combat_wins = combat_wins + 1, karma = karma + $2 WHERE id=$3`,
+        [b.def_bet, ECO.KARMA_COMBAT_WIN, b.attacker_id, MAC.MAX_ENERGY]);
       await client.query(`UPDATE players SET energy = GREATEST(0, energy - $1), losses = losses + 1 WHERE id=$2`,
         [b.def_bet, b.defender_id]);
     } else {
@@ -389,16 +437,16 @@ export async function ecosystemTick(io) {
   const tick = (await getTick()) + 1;
   await setTick(tick);
 
-  // 1) 수입 (밀도 기반은 무거우므로 간이: 셀당 기본 + 노른자 보너스)
-  //    소유 셀 수 × 수입을 플레이어에 적립
+  // 1) 수입 — 셀 가치(value)에 비례, 저장 상한 MAX_ENERGY로 클램프
+  //    큰 영역일수록 많이 생산. 그러나 상한에 도달하면 손해 → 사용 압박.
   await query(`
-    UPDATE players p SET energy = energy + sub.inc
+    UPDATE players p SET energy = LEAST(energy + sub.inc, $2::real)
     FROM (
-      SELECT owner_id, COUNT(*) * $1::real AS inc
+      SELECT owner_id, SUM(value) * $1::real AS inc
       FROM cells WHERE owner_id IS NOT NULL GROUP BY owner_id
     ) sub
     WHERE p.id = sub.owner_id AND p.alive
-  `, [MAC.INCOME_PER_CELL]);
+  `, [MAC.INCOME_PER_VALUE, MAC.MAX_ENERGY]);
 
   // 2) 카르마 누적 (생존 + 영토)
   await query(`
@@ -407,20 +455,9 @@ export async function ecosystemTick(io) {
     WHERE p.id = sub.owner_id AND p.alive
   `, [ECO.KARMA_SURVIVAL * 0.1, ECO.KARMA_TERRITORY * 0.01]);
 
-  // 3) 자연사: 수명 다한 플레이어 → 사망 + 카르마 영혼풀 이월
-  const dying = (await query(
-    `SELECT id, tribe, karma, combat_wins FROM players
-     WHERE alive AND lifespan IS NOT NULL AND ($1 - born_tick) >= lifespan`,
-    [tick]
-  )).rows;
-  for (const d of dying) {
-    const contrib = Number(d.karma) + Number(d.combat_wins) * ECO.COMBAT_DEATH_HERO_BONUS;
-    await query(`UPDATE tribes SET soul_pool = soul_pool + $1 WHERE id=$2`, [contrib, d.tribe]);
-    await query(`UPDATE players SET alive=FALSE WHERE id=$1`, [d.id]);
-    // 자연사 시 셀 자체를 삭제 — owner_id를 null로만 두면 클라이언트에 stale로 남아
-    // "점유되지 않은 영역" 도전 오류를 유발. 영토는 진짜 비어 있어야 한다.
-    await query(`DELETE FROM cells WHERE owner_id=$1`, [d.id]);
-  }
+  // (3) 자연사 — 제거됨. 영구 캐릭터.
+  //     수명 만료 기반 환생/영웅 풀은 보류 (lifespan=NULL이라 트리거 안 됨).
+  const dying = [];
 
   // 4) 종족 영토 캐시 + 약자 추적
   const tc = (await query(

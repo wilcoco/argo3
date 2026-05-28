@@ -17,9 +17,12 @@ export const CONFIG = {
     CELL_SIZE_M: 200,          // 한 영역 셀의 실제 크기 (미터, 대략)
     CLAIM_MIN_VALUE: 15,       // 최소 영역 가치(=점유 비용 최저)
     CLAIM_MAX_VALUE: 90,       // 최대 영역 가치(=점유 비용 최고)
-    CLAIM_DEFAULT_VALUE: 25,   // 슬라이더 초기값 (작게 시작 → 1km 안에 4~6개 점유 가능)
+    CLAIM_DEFAULT_VALUE: 25,   // 슬라이더 초기값
     CLAIM_RADIUS_M: 1000,      // 현재 GPS 위치에서 점유 가능한 반경 (m)
-    INCOME_PER_CELL: 0.6,      // 셀당 시간당 수입 (서버 틱 기준)
+    CELL_PHYSICAL_BASE_M: 100, // 셀 물리 반경 기본값 (m). 실제 = sqrt(value/40) × base
+    ENEMY_CHALLENGE_DIST_M: 50,// 적 셀과 이 거리 이내에 점유 시도 → 자동 도전 흐름으로 전환
+    INCOME_PER_VALUE: 0.08,    // 셀 가치당 시간당 수입 (가치 비례 — 큰 셀 = 많이 생산)
+    MAX_ENERGY: 500,           // 에너지 저장 상한 — 쌓아두기만 하면 손해, 사용 압박
     CORE_BONUS: 2.0,           // 노른자(밀집지) 셀 수입 배율
     DENSITY_RADIUS: 3,         // 밀도 측정 반경 (셀)
     DENSITY_OPT: 8,            // 최적 밀도

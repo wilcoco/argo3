@@ -151,20 +151,18 @@ function renderEcoBar(data) {
 }
 
 // ---- 빈 땅 점유 ----
+// 자유 배치: 탭 지점에 그대로 셀 배치. 자기 셀 겹침 OK (클러스터).
+// 적 셀과 너무 가까우면 서버가 challengeSuggested 응답 → 자동으로 도전 시트로 전환.
 function openClaim(lat, lng) {
   const M = CFG.MACRO;
   const minV = M.CLAIM_MIN_VALUE, maxV = M.CLAIM_MAX_VALUE;
-  // 가진 에너지를 넘지 않게 상한 추가 클램프
   const cap = Math.max(minV, Math.min(maxV, Math.floor(me.energy)));
   const initV = Math.max(minV, Math.min(cap, M.CLAIM_DEFAULT_VALUE));
-  // 200m 그리드 스냅 미리보기 — 탭 지점이 어느 셀로 들어갈지 시각화
-  const snap = macro.snapToCell(lat, lng);
-  macro.setPreviewCell({ lat: snap.lat, lng: snap.lng, value: initV });
-  const dxM = haversineM(lat, lng, snap.lat, snap.lng);
-  // GPS 반경 사전 확인 (서버도 검증하지만 UX상 미리 알림) — 스냅된 셀 중심 기준
+  // 탭 지점에 미리보기 (스냅 없음)
+  macro.setPreviewCell({ lat, lng, value: initV });
   let warn = '';
   if (myLoc) {
-    const dist = haversineM(myLoc.lat, myLoc.lng, snap.lat, snap.lng);
+    const dist = haversineM(myLoc.lat, myLoc.lng, lat, lng);
     if (dist > M.CLAIM_RADIUS_M) {
       const km = (M.CLAIM_RADIUS_M / 1000).toFixed(1);
       const cur = (dist / 1000).toFixed(2);
@@ -176,8 +174,8 @@ function openClaim(lat, lng) {
   const blocked = !!warn;
   $('sheetBody').innerHTML = `
     <h3>빈 땅 점유 <span class="tag free">미점유</span></h3>
-    <div class="sub">탭한 지점은 가까운 200m 그리드 칸에 스냅됩니다.
-      ${dxM > 30 ? `<br><span class="dim">(스냅 ${Math.round(dxM)}m — 지도의 흰 점선 원이 실제 위치)</span>` : ''}
+    <div class="sub">크게 점유할수록 더 많은 에너지가 들고, 영역 가치·생산력이 높아진다.<br>
+      <span class="dim">자기 셀끼리는 겹쳐 클러스터를 만들 수 있다. 적 셀에 너무 가까우면 자동으로 도전이 시도된다.</span>
     </div>
     ${warn}
     <div class="slider-row">
@@ -196,8 +194,7 @@ function openClaim(lat, lng) {
     label.textContent = `⚡${v}`;
     btn.textContent = `점유 (⚡${v})`;
     btn.disabled = me.energy < v;
-    // 미리보기 원 크기도 슬라이더와 함께
-    macro.setPreviewCell({ lat: snap.lat, lng: snap.lng, value: v });
+    macro.setPreviewCell({ lat, lng, value: v });
   };
   update();
   slider.addEventListener('input', update);
@@ -206,12 +203,23 @@ function openClaim(lat, lng) {
   btn.onclick = async () => {
     try {
       const value = Number(slider.value);
-      // 스냅된 좌표를 보내 — 탭 지점과 무관하게 cell 중심으로 정확히
-      await api('/claim', { method: 'POST', body: {
-        playerId: me.id, lat: snap.lat, lng: snap.lng, value,
+      const res = await api('/claim', { method: 'POST', body: {
+        playerId: me.id, lat, lng, value,
         playerLat: myLoc?.lat, playerLng: myLoc?.lng,
       }});
-      cleanup(); closeSheet(); await refreshMe(); await refreshCells();
+      cleanup();
+      // 서버가 적 셀 근처임을 알리면 → 도전 흐름으로 전환
+      if (res && res.challengeSuggested) {
+        await refreshCells();
+        const cs = res.challengeSuggested;
+        // 셀 목록에서 cellId 찾기 — 전체 정보(def_bet, username, ...)
+        const fullCell = (macro.cells || []).find((c) => Number(c.id) === Number(cs.cellId));
+        closeSheet();
+        if (fullCell) openCell(fullCell);
+        else alert('적 영역과 인접 — 직접 셀을 탭해 도전');
+        return;
+      }
+      closeSheet(); await refreshMe(); await refreshCells();
     } catch (e) {
       alert(e.message);
       if (/이미 점유|에너지|위치/.test(e.message || '')) { cleanup(); closeSheet(); refreshCells(); }
@@ -268,7 +276,7 @@ function openCell(c) {
 async function startChallenge(c, atkBet) {
   try {
     const result = await api('/challenge', { method: 'POST',
-      body: { playerId: me.id, cellX: c.cell_x, cellY: c.cell_y, atkBet } });
+      body: { playerId: me.id, cellId: c.id, cellX: c.cell_x, cellY: c.cell_y, atkBet } });
 
     // (A) 즉시 전투 시작 (셀이 한가)
     if (result.battle) {

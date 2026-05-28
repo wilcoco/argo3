@@ -58,11 +58,12 @@ router.post('/claim', async (req, res) => {
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
-// 도전 시작 (전투 레코드 생성)
+// 도전 시작 (전투 레코드 생성) — cellId 우선, 없으면 cellX/cellY 호환
 router.post('/challenge', async (req, res) => {
   try {
-    const { playerId, cellX, cellY, atkBet } = req.body;
-    const result = await startChallenge(Number(playerId), Number(cellX), Number(cellY), Number(atkBet));
+    const { playerId, cellId, cellX, cellY, atkBet } = req.body;
+    const target = cellId != null ? { cellId } : { cellX, cellY };
+    const result = await startChallenge(Number(playerId), target, Number(atkBet));
     res.json(result);
   } catch (e) { res.status(400).json({ error: e.message }); }
 });

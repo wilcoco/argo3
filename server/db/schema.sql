@@ -30,22 +30,29 @@ CREATE TABLE IF NOT EXISTS players (
 -- 위도/경도를 그리드 셀로 양자화: cell_x, cell_y
 CREATE TABLE IF NOT EXISTS cells (
   id            BIGSERIAL PRIMARY KEY,
-  cell_x        INTEGER NOT NULL,
+  cell_x        INTEGER NOT NULL,                -- 공간 인덱스 hint (자유 배치 이후엔 위치 근사)
   cell_y        INTEGER NOT NULL,
   owner_id      INTEGER REFERENCES players(id) ON DELETE SET NULL,
   tribe         SMALLINT,                        -- 소유자 종족 (캐시)
-  value         REAL NOT NULL DEFAULT 40,        -- 영역 가치
+  value         REAL NOT NULL DEFAULT 40,        -- 영역 가치 (= 점유 비용 = 물리 반경 기준)
   def_bet       REAL NOT NULL DEFAULT 20,        -- 자동방어 베팅
   def_wins      INTEGER NOT NULL DEFAULT 0,      -- 누적 방어승 (면제용)
   exempt_until  BIGINT,                          -- 면제 만료 (tick)
-  lat           DOUBLE PRECISION,                -- 셀 중심 위도
+  lat           DOUBLE PRECISION,                -- 셀 중심 위도 (자유 배치 — 그리드 스냅 아님)
   lng           DOUBLE PRECISION,                -- 셀 중심 경도
-  claimed_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-  UNIQUE (cell_x, cell_y)
+  claimed_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+  -- (UNIQUE cell_x,cell_y 제거됨: 자유 배치 + 자기 겹침 허용)
 );
 CREATE INDEX IF NOT EXISTS idx_cells_owner ON cells(owner_id);
 CREATE INDEX IF NOT EXISTS idx_cells_xy ON cells(cell_x, cell_y);
 CREATE INDEX IF NOT EXISTS idx_cells_tribe ON cells(tribe);
+
+-- 기존 DB에서 UNIQUE 제약 제거 (자유 배치 전환). 멱등.
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'cells_cell_x_cell_y_key') THEN
+    ALTER TABLE cells DROP CONSTRAINT cells_cell_x_cell_y_key;
+  END IF;
+END $$;
 
 -- 셀에 cooldown(휴식) + 피로 카운터 추가
 ALTER TABLE cells ADD COLUMN IF NOT EXISTS rest_until BIGINT;
