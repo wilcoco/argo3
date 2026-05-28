@@ -23,6 +23,9 @@ export const CONFIG = {
     ENEMY_CHALLENGE_DIST_M: 50,// 적 셀과 이 거리 이내에 점유 시도 → 자동 도전 흐름으로 전환
     INCOME_PER_VALUE: 0.08,    // 셀 가치당 시간당 수입 (가치 비례 — 큰 셀 = 많이 생산)
     MAX_ENERGY: 500,           // 에너지 저장 상한 — 쌓아두기만 하면 손해, 사용 압박
+    HERO_WINS_THRESHOLD: 5,    // 전투 연속 승 N회 도달 → 영웅 발동
+    HERO_DURATION_TICKS: 80,   // 영웅 지속 시간 (틱)
+    HERO_TOWER_BONUS: 0.5,     // 영웅이 마이크로 전투 진입 시 시작 탑 크기 +50%
     CORE_BONUS: 2.0,           // 노른자(밀집지) 셀 수입 배율
     DENSITY_RADIUS: 3,         // 밀도 측정 반경 (셀)
     DENSITY_OPT: 8,            // 최적 밀도

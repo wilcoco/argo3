@@ -281,7 +281,7 @@ async function startChallenge(c, atkBet) {
     // (A) 즉시 전투 시작 (셀이 한가)
     if (result.battle) {
       pending = { battleId: result.battle.id, cell: c, atkBet, defBet: c.def_bet, mySide: 'atk',
-                  proximity: result.proximity };
+                  proximity: result.proximity, hero: result.hero };
       closeSheet();
       socket.emit('battle:join', result.battle.id);
       socket.emit('challenge:initiate', {
@@ -355,7 +355,7 @@ function showWaiting(c) {
 function beginVsAI() {
   const ov = $('overlay'); ov.classList.remove('show'); $('ovBack').style.display = '';
   battle.start(pending.atkBet, pending.defBet, pending.cell.username || '적 거점',
-    { mySide: 'atk', pvp: false, proximity: pending.proximity });
+    { mySide: 'atk', pvp: false, proximity: pending.proximity, hero: pending.hero });
 }
 
 // 양쪽: PvP 실시간 대전 시작
@@ -364,7 +364,7 @@ function beginPvP() {
   show('battleScreen');
   battle.start(pending.atkBet, pending.defBet, pending.regionName || pending.cell?.username || '전장',
     { mySide: pending.mySide, pvp: true, socket, battleId: pending.battleId,
-      proximity: pending.proximity });
+      proximity: pending.proximity, hero: pending.hero });
 }
 
 // ---- 소켓 이벤트 바인딩 (initGame에서 호출) ----
@@ -374,12 +374,13 @@ function bindBattleSockets() {
     if (!pending || !pending.queued || pending.cellId !== data.cellId) {
       // 다른 세션이거나 이미 취소됨 — 그래도 차례가 왔으니 표시 시도
       pending = { queued: false, battleId: data.battleId, cell: pending?.cell || { username: data.regionName, owner_id: data.defenderId },
-                  atkBet: data.atkBet, defBet: data.defBet, mySide: 'atk', proximity: data.proximity };
+                  atkBet: data.atkBet, defBet: data.defBet, mySide: 'atk', proximity: data.proximity, hero: data.hero };
     } else {
       pending.battleId = data.battleId;
       pending.atkBet = data.atkBet;
       pending.defBet = data.defBet;
       pending.proximity = data.proximity;
+      pending.hero = data.hero;
       pending.queued = false;
       pending.mySide = 'atk';
     }

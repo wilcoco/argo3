@@ -220,7 +220,8 @@ export async function startChallenge(attackerId, target, atkBet) {
 
     const R = CONFIG.MICRO.PROXIMITY_RADIUS_M;
     const proximity = await countProximityCells(client, cell.lat, cell.lng, R, attackerId, cell.owner_id);
-    return { battle: b, cell, attacker: atk, defender: def, proximity };
+    const hero = { atk: !!atk.is_hero, def: !!(def && def.is_hero) };
+    return { battle: b, cell, attacker: atk, defender: def, proximity, hero };
   });
 }
 
@@ -262,7 +263,8 @@ export async function popNextChallenger(cellId) {
       const def = (await client.query(`SELECT * FROM players WHERE id=$1`, [cell.owner_id])).rows[0];
       const R = CONFIG.MICRO.PROXIMITY_RADIUS_M;
       const proximity = await countProximityCells(client, Number(cell.lat), Number(cell.lng), R, next.challenger_id, cell.owner_id);
-      return { battle: b, cell, attacker: atk, defender: def, proximity, challengerId: next.challenger_id };
+      const hero = { atk: !!atk.is_hero, def: !!(def && def.is_hero) };
+      return { battle: b, cell, attacker: atk, defender: def, proximity, hero, challengerId: next.challenger_id };
     }
   });
 }
@@ -361,11 +363,13 @@ export async function resolveChallenge(battleId, opts = {}) {
       await client.query(`UPDATE players SET energy = LEAST(energy + $1, $4::real),
         wins = wins + 1, combat_wins = combat_wins + 1, karma = karma + $2 WHERE id=$3`,
         [b.def_bet, ECO.KARMA_COMBAT_WIN, b.attacker_id, MAC.MAX_ENERGY]);
-      await client.query(`UPDATE players SET energy = GREATEST(0, energy - $1), losses = losses + 1 WHERE id=$2`,
+      // 패자(방어자)는 연속 승 리셋 — combat_wins=0 (영웅 트리거가 연속 의미를 갖도록)
+      await client.query(`UPDATE players SET energy = GREATEST(0, energy - $1), losses = losses + 1, combat_wins = 0 WHERE id=$2`,
         [b.def_bet, b.defender_id]);
     } else {
       // 방어 성공: 도전자 베팅 손실, 방어자 누적승 + 면제 판정
-      await client.query(`UPDATE players SET energy = GREATEST(0, energy - $1), losses = losses + 1 WHERE id=$2`,
+      // 패자(도전자)는 연속 승 리셋
+      await client.query(`UPDATE players SET energy = GREATEST(0, energy - $1), losses = losses + 1, combat_wins = 0 WHERE id=$2`,
         [b.atk_bet, b.attacker_id]);
       const newWins = cell.def_wins + 1;
       let exemptUntil = null;
@@ -383,6 +387,17 @@ export async function resolveChallenge(battleId, opts = {}) {
 
     await client.query(`UPDATE battles SET status='done', winner=$1, ended_at=now() WHERE id=$2`,
       [result.winner, battleId]);
+
+    // 영웅 발동 — 전투 승자의 combat_wins가 임계 도달 시
+    // (전투 패배자는 combat_wins 리셋하지 않음 — 누적 의미 유지)
+    const winnerId = result.winner === 'attacker' ? b.attacker_id : b.defender_id;
+    const wRow = (await client.query(`SELECT combat_wins, is_hero FROM players WHERE id=$1 FOR UPDATE`, [winnerId])).rows[0];
+    if (wRow && !wRow.is_hero && wRow.combat_wins >= MAC.HERO_WINS_THRESHOLD) {
+      await client.query(
+        `UPDATE players SET is_hero=TRUE, hero_until=$1, hero_power=10, combat_wins=0 WHERE id=$2`,
+        [tick + MAC.HERO_DURATION_TICKS, winnerId]
+      );
+    }
 
     // 전투 종료 후 피로 누적 + 단계 휴식
     // - 매 전투 후: 짧은 휴식 (60초, 큐는 누적)
@@ -407,7 +422,7 @@ export async function resolveChallenge(battleId, opts = {}) {
       consec = (cell.consec_defenses || 0) + 1;
     }
 
-    const MAC = CONFIG.MACRO;
+    // (모듈 최상단의 MAC 사용 — local 재선언은 TDZ를 유발해 영웅 트리거가 깨졌었다)
     let restTicks = MAC.DEFENDER_REST_TICKS;
     let restReason = 'short';
     if (daily >= MAC.REST_FATIGUE_DAILY) {

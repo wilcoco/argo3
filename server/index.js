@@ -153,7 +153,7 @@ io.on('connection', (socket) => {
 // 큐에서 차례가 된 도전자에게 알림 + 응답 대기 (미응답 시 다음으로 이양)
 const turnPending = new Map();   // battleId → {timer, attackerId}
 function notifyChallengerTurn(popped) {
-  const { battle, cell, defender, proximity, challengerId } = popped;
+  const { battle, cell, defender, proximity, hero, challengerId } = popped;
   const sid = onlinePlayers.get(Number(challengerId));
   const waitSec = CONFIG.MACRO.CHALLENGER_RESPONSE_SEC;
   if (sid) {
@@ -164,7 +164,7 @@ function notifyChallengerTurn(popped) {
       atkBet: Number(battle.atk_bet), defBet: Number(battle.def_bet),
       regionName: defender?.username || '거점',
       defenderId: cell.owner_id,
-      waitSec, proximity,
+      waitSec, proximity, hero,
     });
   }
   // 응답 대기 — 미응답 시 전투 자동 종료(방어자 자동승, 도전자 베팅 손실)

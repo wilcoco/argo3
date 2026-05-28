@@ -103,25 +103,32 @@ export class Battle {
     document.querySelector('.side.me .lbl').textContent = this.mySide === 'atk' ? 'YOU(공격)' : 'YOU(방어)';
     document.querySelector('.side.en .lbl').textContent = 'ENEMY';
     // 양쪽 시작 거점 — 대칭 스폰. 노른자는 비워두고 양쪽이 경쟁해서 점유한다.
-    // 도전자=좌측, 방어자=우측. 시작 탑 크기는 베팅 + "근처 내 영토 수"(보급선)에 비례.
+    // 도전자=좌측, 방어자=우측. 시작 탑 크기는 베팅 + 보급선 + 영웅 상태에 비례.
     const prox = battleOpts.proximity || { atk: 0, def: 0 };
+    const hero = battleOpts.hero || { atk: false, def: false };
     const M2 = this.cfg.MICRO;
+    const MAC = this.cfg.MACRO;
     const proxMult = (count) => 1 + Math.min((count || 0) * M2.PROXIMITY_BONUS_PER, M2.PROXIMITY_BONUS_MAX);
+    const heroMult = (isHero) => isHero ? (1 + (MAC.HERO_TOWER_BONUS || 0.5)) : 1;
     const startRadius = (bet, side) => {
       const base = 18 + Math.sqrt(bet) * 1.4;
-      const bonused = base * proxMult(prox[side]);
-      return Math.max(20, Math.min(50, bonused));
+      const bonused = base * proxMult(prox[side]) * heroMult(hero[side]);
+      return Math.max(20, Math.min(60, bonused));
     };
     const mkStart = (side, sign) => {
       const er = startRadius(this.energy[side], side);
       this.towers.push({ id: this.nextId++, side, x: this.arena.cx + sign * this.arena.r * 0.55,
-        y: this.arena.cy, radius: er, maxHp: er, hp: er });
+        y: this.arena.cy, radius: er, maxHp: er, hp: er, hero: hero[side] });
     };
     mkStart('atk', -1);
     mkStart('def', 1);
     // 보너스가 의미있을 때 안내
-    if (prox.atk || prox.def) {
-      this._proxNote = `보급선 보너스 — 도전자 +${prox.atk}, 방어자 +${prox.def}`;
+    if (prox.atk || prox.def || hero.atk || hero.def) {
+      const parts = [];
+      if (prox.atk || prox.def) parts.push(`보급선 도전자 +${prox.atk}/방어자 +${prox.def}`);
+      if (hero.atk) parts.push('도전자 ⚡영웅');
+      if (hero.def) parts.push('방어자 ⚡영웅');
+      this._proxNote = parts.join(' · ');
     }
     // PvP 네트워크 수신 핸들러
     if (this.pvp && this.socket) this._setupNet();
