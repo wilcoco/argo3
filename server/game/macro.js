@@ -360,16 +360,15 @@ export async function resolveChallenge(battleId, opts = {}) {
         `UPDATE cells SET owner_id=$1, tribe=$2, def_bet=$3, def_wins=0, exempt_until=NULL WHERE id=$4`,
         [b.attacker_id, atk.tribe, Math.min(cell.value, b.atk_bet), cell.id]
       );
+      // 승자: combat_wins는 *평생 누적* (사망 시점 글로리 계산용). 연승 리셋 없음.
       await client.query(`UPDATE players SET energy = LEAST(energy + $1, $4::real),
         wins = wins + 1, combat_wins = combat_wins + 1, karma = karma + $2 WHERE id=$3`,
         [b.def_bet, ECO.KARMA_COMBAT_WIN, b.attacker_id, MAC.MAX_ENERGY]);
-      // 패자(방어자)는 연속 승 리셋 — combat_wins=0 (영웅 트리거가 연속 의미를 갖도록)
-      await client.query(`UPDATE players SET energy = GREATEST(0, energy - $1), losses = losses + 1, combat_wins = 0 WHERE id=$2`,
+      await client.query(`UPDATE players SET energy = GREATEST(0, energy - $1), losses = losses + 1 WHERE id=$2`,
         [b.def_bet, b.defender_id]);
     } else {
       // 방어 성공: 도전자 베팅 손실, 방어자 누적승 + 면제 판정
-      // 패자(도전자)는 연속 승 리셋
-      await client.query(`UPDATE players SET energy = GREATEST(0, energy - $1), losses = losses + 1, combat_wins = 0 WHERE id=$2`,
+      await client.query(`UPDATE players SET energy = GREATEST(0, energy - $1), losses = losses + 1 WHERE id=$2`,
         [b.atk_bet, b.attacker_id]);
       const newWins = cell.def_wins + 1;
       let exemptUntil = null;
@@ -388,15 +387,38 @@ export async function resolveChallenge(battleId, opts = {}) {
     await client.query(`UPDATE battles SET status='done', winner=$1, ended_at=now() WHERE id=$2`,
       [result.winner, battleId]);
 
-    // 영웅 발동 — 전투 승자의 combat_wins가 임계 도달 시
-    // (전투 패배자는 combat_wins 리셋하지 않음 — 누적 의미 유지)
-    const winnerId = result.winner === 'attacker' ? b.attacker_id : b.defender_id;
-    const wRow = (await client.query(`SELECT combat_wins, is_hero FROM players WHERE id=$1 FOR UPDATE`, [winnerId])).rows[0];
-    if (wRow && !wRow.is_hero && wRow.combat_wins >= MAC.HERO_WINS_THRESHOLD) {
-      await client.query(
-        `UPDATE players SET is_hero=TRUE, hero_until=$1, hero_power=10, combat_wins=0 WHERE id=$2`,
-        [tick + MAC.HERO_DURATION_TICKS, winnerId]
-      );
+    // 사망 + 영웅 환생 — 도전 성공으로 방어자가 마지막 셀까지 잃으면 "사망"
+    // 사망 시 누적 노력(combat_wins, karma)에 비례한 확률로 영웅 환생
+    // "단순 사망 숫자가 아니라 열심히 하다가 안타깝게 사망해야 영웅 확률"
+    let deathInfo = null;
+    if (result.winner === 'attacker') {
+      const defCells = Number((await client.query(
+        `SELECT COUNT(*)::int AS n FROM cells WHERE owner_id=$1`, [b.defender_id]
+      )).rows[0].n);
+      if (defCells === 0) {
+        const dp = (await client.query(
+          `SELECT combat_wins, karma FROM players WHERE id=$1`, [b.defender_id]
+        )).rows[0];
+        const cw = Number(dp.combat_wins) || 0;
+        const km = Number(dp.karma) || 0;
+        const glory = cw * MAC.HERO_GLORY_PER_WIN + km * MAC.HERO_GLORY_PER_KARMA;
+        const prob = Math.min(MAC.HERO_PROB_CAP, glory / MAC.HERO_PROB_DIVISOR);
+        const heroRolled = Math.random() < prob;
+        if (heroRolled) {
+          await client.query(
+            `UPDATE players SET combat_wins=0, karma=0,
+             is_hero=TRUE, hero_until=$1, hero_power=10 WHERE id=$2`,
+            [tick + MAC.HERO_DURATION_TICKS, b.defender_id]
+          );
+        } else {
+          // 평범한 사망 — 노력 부족, 영웅 안 됨, 모든 누적치 리셋
+          await client.query(
+            `UPDATE players SET combat_wins=0, karma=0, is_hero=FALSE, hero_until=NULL WHERE id=$1`,
+            [b.defender_id]
+          );
+        }
+        deathInfo = { playerId: b.defender_id, glory, prob, heroRolled };
+      }
     }
 
     // 전투 종료 후 피로 누적 + 단계 휴식
@@ -440,7 +462,7 @@ export async function resolveChallenge(battleId, opts = {}) {
       [restUntil, consec, daily, dayStart, cell.id]);
 
     const restSec = restTicks * (MAC.SERVER_TICK_MS / 1000);
-    return { winner: result.winner, battleTime: result.t, restUntil, restSec, restReason, consec, daily };
+    return { winner: result.winner, battleTime: result.t, restUntil, restSec, restReason, consec, daily, death: deathInfo };
   });
 }
 

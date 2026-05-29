@@ -23,8 +23,12 @@ export const CONFIG = {
     ENEMY_CHALLENGE_DIST_M: 50,// 적 셀과 이 거리 이내에 점유 시도 → 자동 도전 흐름으로 전환
     INCOME_PER_VALUE: 0.08,    // 셀 가치당 시간당 수입 (가치 비례 — 큰 셀 = 많이 생산)
     MAX_ENERGY: 500,           // 에너지 저장 상한 — 쌓아두기만 하면 손해, 사용 압박
-    HERO_WINS_THRESHOLD: 5,    // 전투 연속 승 N회 도달 → 영웅 발동
-    HERO_DURATION_TICKS: 80,   // 영웅 지속 시간 (틱)
+    // 영웅 — 사망(마지막 셀 상실) 시 누적 노력에 비례한 확률로 발동
+    HERO_GLORY_PER_WIN: 3,     // 사망 시 글로리 = combat_wins × 이값 + karma × ...
+    HERO_GLORY_PER_KARMA: 0.5,
+    HERO_PROB_DIVISOR: 50,     // 확률 = min(CAP, glory / 이값)
+    HERO_PROB_CAP: 0.8,        // 최대 영웅 확률
+    HERO_DURATION_TICKS: 80,   // 영웅 지속 (틱)
     HERO_TOWER_BONUS: 0.5,     // 영웅이 마이크로 전투 진입 시 시작 탑 크기 +50%
     CORE_BONUS: 2.0,           // 노른자(밀집지) 셀 수입 배율
     DENSITY_RADIUS: 3,         // 밀도 측정 반경 (셀)

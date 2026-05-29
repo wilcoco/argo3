@@ -503,10 +503,24 @@ async function onBattleEnd(clientWinner) {
   $('ovBack').style.display = '';
   $('ovTitle').textContent = iWon ? '승리' : '패배';
   $('ovTitle').className = iWon ? 'win' : 'lose';
+  // 사망/영웅 환생 안내 — 방어자의 마지막 셀이 빼앗겨 사망한 경우
+  const death = serverResult.death;
+  const myDeath = death && pending.mySide === 'def';
+  const oppDeath = death && pending.mySide === 'atk';
+  let deathNote = '';
+  if (myDeath) {
+    deathNote = death.heroRolled
+      ? `<br><span class="dim">💫 모든 영토를 잃었지만 ${(death.prob*100).toFixed(0)}% 영웅 환생 성공 — 다음 점유에 영웅 상태로 시작!</span>`
+      : `<br><span class="dim">💀 모든 영토를 잃고 사망. 누적 노력 부족(글로리 ${death.glory.toFixed(1)}) — 다시 시작.</span>`;
+  } else if (oppDeath) {
+    deathNote = death.heroRolled
+      ? `<br><span class="dim">상대 영토 전멸 → 영웅 환생 (${(death.prob*100).toFixed(0)}% 성공)</span>`
+      : `<br><span class="dim">상대 영토 전멸 → 평범하게 사망</span>`;
+  }
   if (pending.mySide === 'atk') {
-    $('ovDesc').innerHTML = iWon ? `${pending.cell?.username || '거점'} 점유권 획득!` : `도전 실패. 베팅을 잃었다.`;
+    $('ovDesc').innerHTML = (iWon ? `${pending.cell?.username || '거점'} 점유권 획득!` : `도전 실패. 베팅을 잃었다.`) + deathNote;
   } else {
-    $('ovDesc').innerHTML = iWon ? `방어 성공! 영역을 지켰다.` : `방어 실패. 영역을 빼앗겼다.`;
+    $('ovDesc').innerHTML = (iWon ? `방어 성공! 영역을 지켰다.` : `방어 실패. 영역을 빼앗겼다.`) + deathNote;
   }
   ov.classList.add('show');
   await refreshMe();
