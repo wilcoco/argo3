@@ -119,6 +119,30 @@ function updateWallet() {
   badge.textContent = CFG.TRIBE_NAMES[me.tribe];
   badge.style.background = CFG.TRIBE_COLORS[me.tribe];
   badge.style.color = '#04201e';
+
+  // 글로리 + 영웅 확률 (현재 인생 누적치 기준)
+  const M = CFG.MACRO;
+  const cw = Number(me.combat_wins) || 0;
+  const km = Number(me.karma) || 0;
+  const glory = cw * M.HERO_GLORY_PER_WIN + km * M.HERO_GLORY_PER_KARMA;
+  const prob = Math.min(M.HERO_PROB_CAP, glory / M.HERO_PROB_DIVISOR);
+  $('glory').textContent = glory.toFixed(0);
+  $('heroProb').textContent = `(${Math.round(prob*100)}%)`;
+  $('gloryChip').title =
+    `사망 시 ${Math.round(prob*100)}% 확률로 영웅 환생\n` +
+    `전투 승 ${cw} × ${M.HERO_GLORY_PER_WIN} + 카르마 ${km.toFixed(1)} × ${M.HERO_GLORY_PER_KARMA} = 글로리 ${glory.toFixed(1)}\n` +
+    `확률 = min(${(M.HERO_PROB_CAP*100).toFixed(0)}%, 글로리 / ${M.HERO_PROB_DIVISOR})`;
+
+  // 영웅 상태 뱃지
+  const heroChip = $('heroChip');
+  const gloryChip = $('gloryChip');
+  if (me.is_hero) {
+    heroChip.classList.remove('hidden');
+    gloryChip.classList.add('hidden');
+  } else {
+    heroChip.classList.add('hidden');
+    gloryChip.classList.remove('hidden');
+  }
 }
 async function refreshMe() {
   try { me = await api('/player/' + me.id); updateWallet(); } catch {}
