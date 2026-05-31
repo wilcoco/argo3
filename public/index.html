@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>BACTERIA WAR</title>
-<link rel="stylesheet" href="/css/style.css?v=19">
+<link rel="stylesheet" href="/css/style.css?v=20">
 </head>
 <body>
 <div id="app">
@@ -33,6 +33,10 @@
     </div>
     <canvas id="mapCanvas"></canvas>
     <div class="maphint">탭: <b>빈 땅 점유</b> · 적 영역 탭: <b>도전</b> · 핀치/휠 줌</div>
+    <div class="tut-banner hidden" id="tutBanner">
+      <span class="tut-text" id="tutText"></span>
+      <button class="tut-close" id="tutClose" title="닫기">✕</button>
+    </div>
     <div class="zoom-ctrl">
       <button id="zoomIn" class="zoom-btn">＋</button>
       <button id="zoomOut" class="zoom-btn">−</button>
@@ -86,6 +90,6 @@
 </div>
 
 <script src="/socket.io/socket.io.js"></script>
-<script type="module" src="/js/app.js?v=19"></script>
+<script type="module" src="/js/app.js?v=20"></script>
 </body>
 </html>

@@ -55,14 +55,60 @@ export async function getCellsInBounds(minLat, minLng, maxLat, maxLng) {
   const b = latLngToCell(maxLat, maxLng);
   const x0 = Math.min(a.cellX, b.cellX), x1 = Math.max(a.cellX, b.cellX);
   const y0 = Math.min(a.cellY, b.cellY), y1 = Math.max(a.cellY, b.cellY);
-  const r = await query(
-    `SELECT c.*, p.username, p.is_hero
+  const sql = `SELECT c.*, p.username, p.is_hero, p.is_bot
      FROM cells c LEFT JOIN players p ON c.owner_id = p.id
      WHERE cell_x BETWEEN $1 AND $2 AND cell_y BETWEEN $3 AND $4
-       AND c.owner_id IS NOT NULL`,
-    [x0, x1, y0, y1]
+       AND c.owner_id IS NOT NULL`;
+  let cells = (await query(sql, [x0, x1, y0, y1])).rows;
+  // 시야 내 적 셀 부족하면 봇 셀로 보충 (신규 유저에게 즉시 도전·클러스터 환경 제공)
+  if (cells.length < MAC.BOT_TARGET_PER_VIEW) {
+    const needed = MAC.BOT_TARGET_PER_VIEW - cells.length;
+    await ensureBotCells(minLat, minLng, maxLat, maxLng, needed);
+    cells = (await query(sql, [x0, x1, y0, y1])).rows;
+  }
+  return cells;
+}
+
+// ---- NPC 봇 ----
+// 봇 셀은 보통 플레이어 셀처럼 도전·점유 이전 가능.
+// 봇 자체는 income/karma/hero 처리 대상에서 제외.
+async function getOrCreateBot(client) {
+  // 임의의 기존 봇 재사용 (셀 분산 위해)
+  const ex = (await client.query(
+    `SELECT id, tribe FROM players WHERE is_bot AND alive ORDER BY random() LIMIT 1`
+  )).rows[0];
+  if (ex && Math.random() < 0.6) return ex; // 60% 확률로 기존 봇 사용 (셀 묶임)
+  // 새 봇 생성 — 종족 랜덤 분포
+  const tribe = Math.floor(Math.random() * CONFIG.TRIBE_COUNT);
+  const suffix = ['α','β','γ','δ','ε','ζ','η','θ','ι','κ','λ','μ'][Math.floor(Math.random()*12)];
+  const username = `🤖 Sentinel-${suffix}-${Date.now().toString(36).slice(-4)}`;
+  const ins = await client.query(
+    `INSERT INTO players (username, tribe, energy, born_tick, lifespan, is_bot)
+     VALUES ($1, $2, 0, 0, NULL, TRUE) RETURNING id, tribe`,
+    [username, tribe]
   );
-  return r.rows;
+  return ins.rows[0];
+}
+
+async function ensureBotCells(minLat, minLng, maxLat, maxLng, count) {
+  return tx(async (client) => {
+    for (let i = 0; i < count; i++) {
+      const bot = await getOrCreateBot(client);
+      // 시야 안쪽 어디에 — 가장자리 살짝 안으로
+      const padLat = (maxLat - minLat) * 0.1;
+      const padLng = (maxLng - minLng) * 0.1;
+      const lat = minLat + padLat + Math.random() * (maxLat - minLat - padLat*2);
+      const lng = minLng + padLng + Math.random() * (maxLng - minLng - padLng*2);
+      const value = MAC.BOT_VALUE_MIN + Math.floor(Math.random() * (MAC.BOT_VALUE_MAX - MAC.BOT_VALUE_MIN));
+      const defBet = Math.max(5, Math.round(value * MAC.BOT_DEF_BET_RATIO));
+      const { cellX, cellY } = latLngToCell(lat, lng);
+      await client.query(
+        `INSERT INTO cells (cell_x, cell_y, owner_id, tribe, value, def_bet, lat, lng)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        [cellX, cellY, bot.id, bot.tribe, value, defBet, lat, lng]
+      );
+    }
+  });
 }
 
 // 셀 가치 → 물리 반경 (m)
@@ -482,14 +528,14 @@ export async function ecosystemTick(io) {
       SELECT owner_id, SUM(value) * $1::real AS inc
       FROM cells WHERE owner_id IS NOT NULL GROUP BY owner_id
     ) sub
-    WHERE p.id = sub.owner_id AND p.alive
+    WHERE p.id = sub.owner_id AND p.alive AND NOT p.is_bot
   `, [MAC.INCOME_PER_VALUE, MAC.MAX_ENERGY]);
 
-  // 2) 카르마 누적 (생존 + 영토)
+  // 2) 카르마 누적 (생존 + 영토) — 봇 제외
   await query(`
     UPDATE players p SET karma = karma + $1::real + COALESCE(sub.cnt,0) * $2::real
     FROM (SELECT owner_id, COUNT(*) cnt FROM cells WHERE owner_id IS NOT NULL GROUP BY owner_id) sub
-    WHERE p.id = sub.owner_id AND p.alive
+    WHERE p.id = sub.owner_id AND p.alive AND NOT p.is_bot
   `, [ECO.KARMA_SURVIVAL * 0.1, ECO.KARMA_TERRITORY * 0.01]);
 
   // (3) 자연사 — 제거됨. 영구 캐릭터.

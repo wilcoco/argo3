@@ -110,7 +110,46 @@ function initGame() {
 
   setInterval(refreshCells, 8000);
   setInterval(refreshMe, 5000);   // 서버 틱과 같은 5초 — 즉시 반영
+  tutorial.init();
 }
+
+// ---- 튜토리얼 (신규 유저 첫 5분 안내) ----
+const tutorial = {
+  steps: [
+    { id: 'welcome', html: '👋 환영! 지도에서 <b>빈 곳을 탭</b>해 첫 영토를 점유하자.' },
+    { id: 'find_enemy', html: '✓ 점유 완료! 이제 <b>지도의 다른 색 셀(적/봇)</b>을 탭해 도전해보자.' },
+    { id: 'battle_hint', html: '⚔ 전투 화면: <b>탭=탑 위치 선정 → 크기 정한 뒤 [건설]</b>. 내 탑 탭→적 탑 탭으로 사격.' },
+    { id: 'done', html: '' },
+  ],
+  init() {
+    const saved = Number(localStorage.getItem('bw_tut') || 0);
+    this.step = isNaN(saved) ? 0 : saved;
+    $('tutClose').addEventListener('click', () => this.dismiss());
+    this.render();
+  },
+  render() {
+    const s = this.steps[this.step];
+    const banner = $('tutBanner');
+    if (!s || !s.html) { banner.classList.add('hidden'); return; }
+    $('tutText').innerHTML = s.html;
+    banner.classList.remove('hidden');
+  },
+  advance(event) {
+    // 이벤트로 단계 자동 진행
+    const map = { welcome: 'claimed', find_enemy: 'challenged', battle_hint: 'battled' };
+    const expected = map[this.steps[this.step]?.id];
+    if (expected === event) {
+      this.step += 1;
+      localStorage.setItem('bw_tut', String(this.step));
+      this.render();
+    }
+  },
+  dismiss() {
+    this.step = this.steps.length - 1;
+    localStorage.setItem('bw_tut', String(this.step));
+    this.render();
+  },
+};
 
 // 현재 내 셀들의 1틱당 총 수입 — me.cells_value를 서버에서 받거나 macro.cells에서 합산
 function myIncomePerTick() {
@@ -270,6 +309,7 @@ function openClaim(lat, lng) {
         return;
       }
       closeSheet(); await refreshMe(); await refreshCells();
+      tutorial.advance('claimed');
     } catch (e) {
       alert(e.message);
       if (/이미 점유|에너지|위치/.test(e.message || '')) { cleanup(); closeSheet(); refreshCells(); }
@@ -340,6 +380,7 @@ async function startChallenge(c, atkBet) {
       pending = { battleId: result.battle.id, cell: c, atkBet, defBet: c.def_bet, mySide: 'atk',
                   proximity: result.proximity, hero: result.hero };
       closeSheet();
+      tutorial.advance('challenged');
       socket.emit('battle:join', result.battle.id);
       socket.emit('challenge:initiate', {
         battleId: result.battle.id,
@@ -541,6 +582,7 @@ function onIncomingChallenge({ battleId, attackerName, regionName, atkBet, defBe
 
 // 전투 종료 → 서버 검증 (도전자만 resolve 호출, 방어자는 결과 수신)
 async function onBattleEnd(clientWinner) {
+  tutorial.advance('battled');
   // PvP: 상대에게 내 결과 보고
   if (battle.pvp) {
     socket.emit('battle:report', { battleId: pending.battleId, winner: clientWinner });

@@ -22,6 +22,10 @@ export const CONFIG = {
     CELL_PHYSICAL_BASE_M: 100, // 셀 물리 반경 기본값 (m). 실제 = sqrt(value/40) × base
     ENEMY_CHALLENGE_DIST_M: 50,// 적 셀과 이 거리 이내에 점유 시도 → 자동 도전 흐름으로 전환
     INCOME_PER_VALUE: 0.15,    // 셀 가치당 시간당 수입 — 0.08 → 0.15로 ~2배 ↑ (체감 속도 개선)
+    BOT_TARGET_PER_VIEW: 5,    // 지도 시야 내 최소 적 셀 수 (밑돌면 봇 셀 자동 생성)
+    BOT_VALUE_MIN: 20,
+    BOT_VALUE_MAX: 50,
+    BOT_DEF_BET_RATIO: 0.4,    // 봇 셀의 방어 베팅 = 가치 × 이값 (낮게 → 도전 쉽게)
     MAX_ENERGY: 500,           // 에너지 저장 상한 — 쌓아두기만 하면 손해, 사용 압박
     // 영웅 — 사망(마지막 셀 상실) 시 누적 노력에 비례한 확률로 발동
     HERO_GLORY_PER_WIN: 3,     // 사망 시 글로리 = combat_wins × 이값 + karma × ...

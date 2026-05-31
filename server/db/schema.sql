@@ -54,6 +54,10 @@ DO $$ BEGIN
   END IF;
 END $$;
 
+-- 플레이어에 봇 플래그 추가 (NPC 시드 봇 식별)
+ALTER TABLE players ADD COLUMN IF NOT EXISTS is_bot BOOLEAN NOT NULL DEFAULT FALSE;
+CREATE INDEX IF NOT EXISTS idx_players_bot ON players(is_bot);
+
 -- 셀에 cooldown(휴식) + 피로 카운터 추가
 ALTER TABLE cells ADD COLUMN IF NOT EXISTS rest_until BIGINT;
 ALTER TABLE cells ADD COLUMN IF NOT EXISTS consec_defenses INTEGER NOT NULL DEFAULT 0;
