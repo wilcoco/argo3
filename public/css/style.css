@@ -34,6 +34,12 @@ input[type=text]{width:100%;padding:12px;border-radius:8px;border:1px solid var(
 .wallet .dim{font-size:10px;}
 .dim{color:var(--dim);}
 .tribe-badge{padding:2px 8px;border-radius:4px;font-size:10px;font-weight:700;background:var(--line2);}
+.income-rate{margin-left:4px;color:#a4ffb8;font-size:10px;font-weight:600;}
+.prod-line{background:rgba(255,224,110,.08);border:1px solid rgba(255,224,110,.25);
+  border-radius:6px;padding:10px 12px;margin:10px 0;display:flex;align-items:baseline;
+  justify-content:space-between;gap:8px;}
+.prod-num{font-size:18px;font-weight:700;color:#ffe06e;}
+.prod-num .dim{font-size:11px;font-weight:400;margin-left:2px;}
 .glory-chip{display:inline-flex;align-items:center;gap:3px;}
 .glory-chip b{color:#ffc24d;}
 .hero-chip{padding:2px 6px;border-radius:4px;font-size:10px;font-weight:700;

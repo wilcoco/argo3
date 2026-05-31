@@ -109,11 +109,22 @@ function initGame() {
   });
 
   setInterval(refreshCells, 8000);
-  setInterval(refreshMe, 10000);
+  setInterval(refreshMe, 5000);   // 서버 틱과 같은 5초 — 즉시 반영
+}
+
+// 현재 내 셀들의 1틱당 총 수입 — me.cells_value를 서버에서 받거나 macro.cells에서 합산
+function myIncomePerTick() {
+  if (!macro || !macro.cells) return 0;
+  const sum = macro.cells.reduce((s, c) =>
+    s + (c.owner_id === me.id ? Number(c.value || 0) : 0), 0);
+  return sum * (CFG.MACRO.INCOME_PER_VALUE || 0);
 }
 
 function updateWallet() {
   $('energy').textContent = Math.floor(me.energy);
+  const rate = myIncomePerTick();
+  const rateEl = $('incomeRate');
+  if (rateEl) rateEl.textContent = rate > 0 ? `+${rate.toFixed(1)}/틱` : '';
   $('record').textContent = `${me.wins}승 ${me.losses}패`;
   const badge = $('tribeBadge');
   badge.textContent = CFG.TRIBE_NAMES[me.tribe];
@@ -145,7 +156,20 @@ function updateWallet() {
   }
 }
 async function refreshMe() {
-  try { me = await api('/player/' + me.id); updateWallet(); } catch {}
+  try {
+    const prev = me ? Number(me.energy) : 0;
+    me = await api('/player/' + me.id);
+    const delta = Number(me.energy) - prev;
+    updateWallet();
+    // 수입이 들어왔으면 내 셀들 위로 +N 부유 텍스트 (눈에 보이는 생산 피드백)
+    if (delta > 0.5 && macro && macro.cells) {
+      macro.flashIncome(me.id, delta);
+    }
+  } catch {}
+}
+// 더 자주 갱신 — 5초마다 (서버 틱과 일치)
+function startFastRefresh() {
+  setInterval(refreshMe, 5000);
 }
 
 async function refreshCells() {
@@ -154,6 +178,8 @@ async function refreshCells() {
   try {
     const cells = await api(`/cells?minLat=${b.minLat}&minLng=${b.minLng}&maxLat=${b.maxLat}&maxLng=${b.maxLng}`);
     macro.setCells(cells);
+    // 셀 갱신 후 HUD 수입률도 다시 계산 (cells 의존)
+    if (me) updateWallet();
   } catch {}
 }
 function macroBounds() {
@@ -254,9 +280,16 @@ function openClaim(lat, lng) {
 // ---- 셀 탭 (내 영역 / 적 영역) ----
 function openCell(c) {
   if (c.owner_id === me.id) {
+    const incomePerTick = Number(c.value) * CFG.MACRO.INCOME_PER_VALUE;
+    const tickSec = CFG.MACRO.SERVER_TICK_MS / 1000;
+    const perMin = incomePerTick * (60 / tickSec);
     $('sheetBody').innerHTML = `
       <h3>${c.username || '내 거점'} <span class="tag me">내 영역</span></h3>
       <div class="sub">가치 ${c.value} · 자동방어 베팅 ⚡${c.def_bet}</div>
+      <div class="prod-line">
+        <span class="prod-num">+${incomePerTick.toFixed(1)}<span class="dim">/${tickSec}초</span></span>
+        <span class="dim">= 분당 약 ${perMin.toFixed(0)}</span>
+      </div>
       <div class="btnrow"><button class="btn ghost" id="cancelBtn">닫기</button></div>`;
     openSheet(); $('cancelBtn').onclick = closeSheet;
     return;

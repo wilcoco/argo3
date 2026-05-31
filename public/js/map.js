@@ -126,6 +126,26 @@ export class MacroMap {
   setMyLoc(loc) { this.myLoc = loc; }
   setPreviewCell(p) { this.previewCell = p; } // {lat, lng, value} or null
 
+  // 수입이 들어왔을 때 내 셀들 위로 +N 부유 텍스트. delta 총량을 셀 value 비례로 분배.
+  flashIncome(myId, totalDelta) {
+    if (!this.cells || !totalDelta) return;
+    const myCells = this.cells.filter(c => c.owner_id === myId && c.value);
+    if (!myCells.length) return;
+    const sumV = myCells.reduce((s, c) => s + Number(c.value), 0);
+    if (sumV <= 0) return;
+    this._floats = this._floats || [];
+    const t0 = performance.now();
+    for (const c of myCells) {
+      const share = (Number(c.value) / sumV) * totalDelta;
+      if (share < 0.3) continue;
+      this._floats.push({
+        lat: Number(c.lat), lng: Number(c.lng),
+        text: `+${share.toFixed(1)}`,
+        born: t0, dur: 1400
+      });
+    }
+  }
+
   // 위경도 → 셀 중심 위경도 (서버 geo.js와 동일 공식, 그리드 양자화 미리보기용)
   snapToCell(lat, lng) {
     const cellDeg = (this.cellSizeM || 200) / 111000;
@@ -244,6 +264,33 @@ export class MacroMap {
     }
     this._drawMyLoc();
     this._drawPreviewCell();
+    this._drawFloats();
+  }
+
+  // 수입 +N 부유 텍스트 — born+dur 동안 위로 올라가며 페이드
+  _drawFloats() {
+    if (!this._floats || !this._floats.length) return;
+    const ctx = this.ctx;
+    const now = performance.now();
+    const alive = [];
+    ctx.save();
+    ctx.font = 'bold 13px JetBrains Mono,monospace';
+    ctx.textAlign = 'center';
+    for (const f of this._floats) {
+      const age = (now - f.born) / f.dur;
+      if (age >= 1) continue;
+      alive.push(f);
+      const p = this.geo2screen(f.lat, f.lng);
+      if (p.x < -40 || p.x > this.W+40) continue;
+      const a = 1 - age;
+      const y = p.y - 22 - age * 36;        // 위로 36px 상승
+      ctx.fillStyle = `rgba(0,0,0,${0.55 * a})`;
+      ctx.fillText(f.text, p.x + 1, y + 1);   // 그림자
+      ctx.fillStyle = `rgba(255, 224, 110, ${a})`; // 금색
+      ctx.fillText(f.text, p.x, y);
+    }
+    ctx.restore();
+    this._floats = alive;
   }
 
   // 점유 시트 열려 있을 때 — 그리드 스냅된 셀이 어디 생길지 미리 표시
