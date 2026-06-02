@@ -230,6 +230,47 @@ export class Battle {
     this._fx = this._fx || [];
     this._fx.push({ x, y, life: 0.45, max: 0.45, side });
   }
+  // 시각용 포탄 — 데미지는 별도(연속), 이건 *보이게* 만들기 위함
+  _spawnProj(from, to, focused) {
+    this._proj = this._proj || [];
+    // 출발 방향 약간 분산
+    const ang = Math.atan2(to.y - from.y, to.x - from.x) + (Math.random() - 0.5) * 0.15;
+    const dist = Math.hypot(to.x - from.x, to.y - from.y);
+    const speed = focused ? 720 : 480;     // px/sec — 집중사격이 더 빠르게
+    const dur = Math.max(0.08, dist / speed);
+    // 출발은 from 가장자리에서
+    const sx = from.x + Math.cos(ang) * this.STONE_R;
+    const sy = from.y + Math.sin(ang) * this.STONE_R;
+    this._proj.push({
+      sx, sy, tid: to.id, target: to,
+      x: sx, y: sy, t: 0, dur, side: from.side, focused,
+    });
+  }
+  _updateProj(dt) {
+    if (!this._proj) return;
+    for (let i = this._proj.length - 1; i >= 0; i--) {
+      const p = this._proj[i];
+      p.t += dt;
+      if (p.t >= p.dur || !this.stones.includes(p.target)) {
+        // 도착 — 임팩트 페인트
+        this._fx = this._fx || [];
+        this._fx.push({ x: p.x, y: p.y, life: 0.18, max: 0.18, side: p.side, hit: true });
+        this._proj.splice(i, 1);
+        continue;
+      }
+      const k = p.t / p.dur;
+      // 살짝 휘는 곡선 (제어점 = 중간 + 수직 오프셋)
+      const ex = p.target.x, ey = p.target.y;
+      const mx = (p.sx + ex) / 2, my = (p.sy + ey) / 2;
+      const nx = -(ey - p.sy), ny = (ex - p.sx);
+      const nlen = Math.hypot(nx, ny) || 1;
+      const arc = Math.min(18, Math.hypot(ex - p.sx, ey - p.sy) * 0.12);
+      const cx = mx + (nx / nlen) * arc, cy = my + (ny / nlen) * arc;
+      const omk = 1 - k;
+      p.x = omk*omk*p.sx + 2*omk*k*cx + k*k*ex;
+      p.y = omk*omk*p.sy + 2*omk*k*cy + k*k*ey;
+    }
+  }
 
   // ====== AI ======
   _ai(dt) {
@@ -295,8 +336,8 @@ export class Battle {
     this.placeCD.atk = Math.max(0, this.placeCD.atk - dt);
     this.placeCD.def = Math.max(0, this.placeCD.def - dt);
 
-    // 자동 공격: 인접 적에 데미지
-    // 집중공격 중인 내 돌은 focusTarget만 공격
+    // 자동 공격: 인접 적에 데미지 (연속)
+    // + 시각용 포탄을 주기적으로 발사 (각 공격자가 fireCD 만료마다)
     const incoming = new Map();    // stone idx → {atk:N, def:N}
     const focusSet = this.selSet;
     const focusTgt = this.focusTarget;
@@ -304,6 +345,7 @@ export class Battle {
     const range = this.ATTACK_RANGE + this.STONE_R * 2;
     for (let i = 0; i < this.stones.length; i++) {
       const a = this.stones[i];
+      a._fireCD = (a._fireCD || 0) - dt;     // 시각 포탄 발사 쿨다운
       const focused = (a.side === this.mySide) && focusSet.has(a.id) && focusTgtAlive;
       if (focused) {
         // 사거리 무관: 집중공격은 어디서든 가능 (드래그한 모든 내 돌 → 적)
@@ -311,9 +353,11 @@ export class Battle {
         focusTgt.hp -= this.M.DPS_PER_ATTACKER * dt;
         if (!incoming.has(j)) incoming.set(j, { atk:0, def:0 });
         incoming.get(j)[a.side]++;
+        if (a._fireCD <= 0) { this._spawnProj(a, focusTgt, true); a._fireCD = 0.18; }
         continue;
       }
       // 평소: 사거리 내 모든 적
+      let firedThisTick = false;
       for (let j = 0; j < this.stones.length; j++) {
         if (i === j) continue;
         const b = this.stones[j];
@@ -322,6 +366,10 @@ export class Battle {
           b.hp -= this.M.DPS_PER_ATTACKER * dt;
           if (!incoming.has(j)) incoming.set(j, { atk:0, def:0 });
           incoming.get(j)[a.side]++;
+          // 시각 포탄 — 첫 사거리 적에게만 (한 틱에 한 발) 쿨다운 만료 시
+          if (!firedThisTick && a._fireCD <= 0) {
+            this._spawnProj(a, b, false); a._fireCD = 0.28; firedThisTick = true;
+          }
         }
       }
     }
@@ -356,6 +404,8 @@ export class Battle {
         if (this._fx[i].life <= 0) this._fx.splice(i, 1);
       }
     }
+    // 포탄 진행
+    this._updateProj(dt);
 
     this._ai(dt);
 
@@ -465,15 +515,43 @@ export class Battle {
       ctx.strokeRect(x, y, w, h); ctx.setLineDash([]);
     }
 
-    // 배치 이펙트
+    // 포탄 (날아가는 탄알 — 시각만, 데미지는 별도 연속 처리)
+    if (this._proj) {
+      for (const p of this._proj) {
+        const col = this._colorOf(p.side);
+        // 꼬리 (이전 위치 살짝 흐리게)
+        const tx = p.target.x, ty = p.target.y;
+        const back = 0.2;     // 꼬리 길이 비율
+        const bx = p.x - (tx - p.x) * back;
+        const by = p.y - (ty - p.y) * back;
+        ctx.strokeStyle = `rgba(${col.rgb}, ${p.focused ? 0.85 : 0.55})`;
+        ctx.lineWidth = p.focused ? 2.5 : 1.6;
+        ctx.beginPath(); ctx.moveTo(bx, by); ctx.lineTo(p.x, p.y); ctx.stroke();
+        // 머리 — 작은 원
+        ctx.beginPath(); ctx.arc(p.x, p.y, p.focused ? 3 : 2.2, 0, Math.PI*2);
+        ctx.fillStyle = p.focused ? '#fff5b0' : `rgba(${col.rgb}, 0.95)`;
+        ctx.fill();
+      }
+    }
+
+    // 배치 / 임팩트 이펙트
     if (this._fx) {
       for (const f of this._fx) {
         const a = f.life / f.max;
-        const r = this.STONE_R * (1 + (1 - a) * 1.5);
         const col = this._colorOf(f.side);
-        ctx.beginPath(); ctx.arc(f.x, f.y, r, 0, Math.PI*2);
-        ctx.strokeStyle = `rgba(${col.rgb}, ${a})`;
-        ctx.lineWidth = 2; ctx.stroke();
+        if (f.hit) {
+          // 작은 폭발
+          const r = 4 + (1 - a) * 8;
+          ctx.beginPath(); ctx.arc(f.x, f.y, r, 0, Math.PI*2);
+          ctx.fillStyle = `rgba(${col.rgb}, ${a * 0.4})`;
+          ctx.fill();
+        } else {
+          // 배치 링 확산
+          const r = this.STONE_R * (1 + (1 - a) * 1.5);
+          ctx.beginPath(); ctx.arc(f.x, f.y, r, 0, Math.PI*2);
+          ctx.strokeStyle = `rgba(${col.rgb}, ${a})`;
+          ctx.lineWidth = 2; ctx.stroke();
+        }
       }
     }
 
