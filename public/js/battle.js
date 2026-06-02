@@ -1,486 +1,537 @@
 // ============================================================
-//  마이크로 전투 (클라이언트 실시간) — 노른자 + 진화 AI
-//  플레이가 끝나면 서버에 결과 검증 요청.
+//  마이크로 전투 — 바둑·오델로식
+//  · 균일 돌 (반경·HP·비용 고정), 겹침 금지
+//  · 자동 공격: 인접 적에 매 초 DPS_PER_ATTACKER × 시간
+//  · 변환: 사망 시 다수 공격자 진영으로 만렙 부활 (동수면 그냥 죽음)
+//  · 각 돌이 일정 생산 → 탑 많을수록 새 돌 빨리
+//  · 수동: 내 돌 탭/드래그 다중선택 → 적 탭 = 선택 돌들이 그 적 집중공격
+//  · 승: 한쪽 전멸 OR 타임아웃 시 다수
 // ============================================================
+
 export class Battle {
   constructor(canvas, cfg, opts = {}) {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d');
     this.cfg = cfg;
     this.onEnd = opts.onEnd || (() => {});
-    this.colors = { atk: { s:'#3ad1c8', f:'rgba(58,209,200,0.14)', rgb:'58,209,200' },
-                    def: { s:'#ff5d73', f:'rgba(255,93,115,0.14)', rgb:'255,93,115' } };
-    this.sizeSlider = document.getElementById('sizeSlider');
-    this.sizeSlider.oninput = () => {
-      this.selSize = +this.sizeSlider.value;
-      this._updateSizeCost();
-    };
-    // 건설 확정/취소 버튼 (HTML에 추가됨)
-    const confirmBtn = document.getElementById('placeConfirm');
-    const cancelBtn = document.getElementById('placeCancel');
-    if (confirmBtn) confirmBtn.addEventListener('click', () => this._confirmPlace());
-    if (cancelBtn) cancelBtn.addEventListener('click', () => this._cancelPlace());
-    canvas.addEventListener('click', (e) => this._onClick(e));
-    // 터치 보강 (모바일 — 매크로 지도와 동일 패턴)
-    let touchStart = null;
-    canvas.addEventListener('touchstart', (e) => {
-      if (e.touches.length !== 1) { touchStart = null; return; }
-      const t = e.touches[0];
-      touchStart = { x: t.clientX, y: t.clientY, t: Date.now() };
-    }, { passive: true });
-    canvas.addEventListener('touchend', (e) => {
-      if (!touchStart) return;
-      const t = e.changedTouches[0];
-      const dx = t.clientX - touchStart.x, dy = t.clientY - touchStart.y;
-      const dt = Date.now() - touchStart.t;
-      touchStart = null;
-      if (dt < 500 && dx*dx + dy*dy < 100) {
-        e.preventDefault();
-        this._onClick({ clientX: t.clientX, clientY: t.clientY });
-      }
-    });
+    this.colors = { atk: { s:'#3ad1c8', f:'rgba(58,209,200,0.20)', rgb:'58,209,200' },
+                    def: { s:'#ff5d73', f:'rgba(255,93,115,0.20)', rgb:'255,93,115' } };
+    // 마우스+터치 입력
+    canvas.addEventListener('mousedown', (e) => this._onDown(e));
+    canvas.addEventListener('mousemove', (e) => this._onMove(e));
+    canvas.addEventListener('mouseup',   (e) => this._onUp(e));
+    canvas.addEventListener('touchstart',(e) => this._onTouchStart(e), { passive:false });
+    canvas.addEventListener('touchmove', (e) => this._onTouchMove(e),  { passive:false });
+    canvas.addEventListener('touchend',  (e) => this._onTouchEnd(e),   { passive:false });
+    // 선택 해제 버튼
+    const clr = document.getElementById('clearSel');
+    if (clr) clr.addEventListener('click', () => this._clearSel());
   }
 
-  _updateSizeCost() {
-    const c = document.getElementById('sizeCost');
-    const cfm = document.getElementById('placeConfirm');
-    const have = this.energy ? Math.floor(this.energy[this.mySide] || 0) : 0;
-    const enough = have >= this.selSize;
-    if (c) {
-      c.textContent = this.pendingPlace
-        ? (enough ? `여기 건설 ⚡${this.selSize}` : `에너지 부족 (${have}/${this.selSize})`)
-        : `비용 ⚡${this.selSize}`;
-      c.style.color = enough ? '' : '#ff8a96';
-    }
-    if (cfm) cfm.disabled = !enough;
-  }
-  _showPlacementUI(on) {
-    const cfm = document.getElementById('placeConfirm');
-    const cnl = document.getElementById('placeCancel');
-    if (cfm) cfm.style.display = on ? '' : 'none';
-    if (cnl) cnl.style.display = on ? '' : 'none';
-  }
-  _cancelPlace() {
-    this.pendingPlace = null;
-    this._showPlacementUI(false);
-    this._updateSizeCost();
-    const hint = document.getElementById('modeHint');
-    if (hint) hint.textContent = '탭하여 건설 위치 정하기';
-  }
-  _confirmPlace() {
-    if (!this.pendingPlace) return;
-    const ok = this._build(this.pendingPlace.x, this.pendingPlace.y, this.mySide);
-    if (ok) this._cancelPlace();
-  }
-
+  // ====== 시작 ======
   start(atkBet, defBet, regionName, battleOpts = {}) {
     const M = this.cfg.MICRO;
     this._resize();
-    this.towers = []; this.proj = []; this.fx = []; this.nextId = 0; this.selTower = null;
-    this.pendingPlace = null;       // {x, y} 건설 후보 위치 (확정 전)
+    this.M = M;
+    this.STONE_R = M.STONE_R;
+    this.MIN_SPACING = M.STONE_R * M.MIN_SPACING_FACTOR;
+    this.ATTACK_RANGE = M.STONE_R * M.ATTACK_RANGE_FACTOR;
+    this.stones = [];
     this.energy = { atk: atkBet, def: defBet };
-    this.rate = { atk: 0, def: 0 };
-    this.selSize = 25; this.sizeSlider.value = 25;
-    this._showPlacementUI(false);
-    this._updateSizeCost();
-    this.running = false;
+    this.placeCD = { atk: 0, def: 0 };
     this.aiTimer = 0;
-    // 내가 조작하는 진영. 도전자=atk, 방어자=def. 기본 atk(기존 호환)
+    this.nextId = 0;
+    this.running = false;
+    this.startT = 0;
     this.mySide = battleOpts.mySide || 'atk';
     this.foeSide = this.mySide === 'atk' ? 'def' : 'atk';
-    // 상대가 사람인가(PvP) — 아니면 상대 진영을 AI가 조작
     this.pvp = !!battleOpts.pvp;
     this.socket = battleOpts.socket || null;
     this.battleId = battleOpts.battleId || null;
-    this._netAccum = 0;             // 네트워크 상태 전송 누적
+    this._netAccum = 0;
     this.arena = { cx: this.W/2, cy: this.H/2, r: Math.min(this.W, this.H) * M.ARENA_RATIO };
-    this.coreR = this.arena.r * M.CORE_RADIUS_FRAC;
+    this.hero = battleOpts.hero || { atk:false, def:false };
+
+    // 시작 돌 — 양 끝 + 보급선 보너스
+    const prox = battleOpts.proximity || { atk:0, def:0 };
+    const extraAtk = Math.min(prox.atk, M.PROXIMITY_BONUS_MAX);
+    const extraDef = Math.min(prox.def, M.PROXIMITY_BONUS_MAX);
+    this._seedStones('atk', extraAtk);
+    this._seedStones('def', extraDef);
+
     document.getElementById('stakeBar').textContent =
       `베팅 ⚡${atkBet} vs ⚡${defBet} · ${regionName}` + (this.pvp ? ' · ⚔실시간 대전' : '');
-    // 색상: 내 진영을 항상 청록(아군 느낌)으로, 상대를 적색으로 보이게 매핑
     this._colorOf = (side) => (side === this.mySide ? this.colors.atk : this.colors.def);
-    // HUD 라벨도 진영에 맞게
-    document.querySelector('.side.me .lbl').textContent = this.mySide === 'atk' ? 'YOU(공격)' : 'YOU(방어)';
+    document.querySelector('.side.me .lbl').textContent = this.mySide === 'atk' ? 'YOU' : 'YOU(방어)';
     document.querySelector('.side.en .lbl').textContent = 'ENEMY';
-    // 양쪽 시작 거점 — 대칭 스폰. 노른자는 비워두고 양쪽이 경쟁해서 점유한다.
-    // 도전자=좌측, 방어자=우측. 시작 탑 크기는 베팅 + 보급선 + 영웅 상태에 비례.
-    const prox = battleOpts.proximity || { atk: 0, def: 0 };
-    const hero = battleOpts.hero || { atk: false, def: false };
-    const M2 = this.cfg.MICRO;
-    const MAC = this.cfg.MACRO;
-    const proxMult = (count) => 1 + Math.min((count || 0) * M2.PROXIMITY_BONUS_PER, M2.PROXIMITY_BONUS_MAX);
-    const heroMult = (isHero) => isHero ? (1 + (MAC.HERO_TOWER_BONUS || 0.5)) : 1;
-    const startRadius = (bet, side) => {
-      const base = 18 + Math.sqrt(bet) * 1.4;
-      const bonused = base * proxMult(prox[side]) * heroMult(hero[side]);
-      return Math.max(20, Math.min(60, bonused));
-    };
-    const mkStart = (side, sign) => {
-      const er = startRadius(this.energy[side], side);
-      this.towers.push({ id: this.nextId++, side, x: this.arena.cx + sign * this.arena.r * 0.55,
-        y: this.arena.cy, radius: er, maxHp: er, hp: er, hero: hero[side] });
-    };
-    mkStart('atk', -1);
-    mkStart('def', 1);
-    // 보너스가 의미있을 때 안내
-    if (prox.atk || prox.def || hero.atk || hero.def) {
-      const parts = [];
-      if (prox.atk || prox.def) parts.push(`보급선 도전자 +${prox.atk}/방어자 +${prox.def}`);
-      if (hero.atk) parts.push('도전자 ⚡영웅');
-      if (hero.def) parts.push('방어자 ⚡영웅');
-      this._proxNote = parts.join(' · ');
-    }
-    // PvP 네트워크 수신 핸들러
+
+    // 선택/집중 상태
+    this.selSet = new Set();           // 선택된 내 돌 id 모음
+    this.focusTarget = null;            // 집중공격 적 stone
+    this._drag = null;                  // {x0,y0,x1,y1,active}
+
     if (this.pvp && this.socket) this._setupNet();
     this._countdown();
   }
 
-  // PvP: 상대의 행동/상태 수신
+  _seedStones(side, extra) {
+    // 끝에서 약간 안쪽으로 시작 — 부채꼴 모양
+    const sign = side === 'atk' ? -1 : 1;
+    const baseX = this.arena.cx + sign * this.arena.r * 0.65;
+    const total = 1 + extra;
+    const spread = this.MIN_SPACING * 1.05;
+    for (let i = 0; i < total; i++) {
+      const off = (i - (total-1)/2) * spread;
+      const x = baseX, y = this.arena.cy + off;
+      if (this._inArena(x, y) && !this._tooClose(x, y)) {
+        this.stones.push(this._mkStone(side, x, y));
+      }
+    }
+  }
+
+  _mkStone(side, x, y) {
+    return { id: this.nextId++, side, x, y, hp: this.M.STONE_HP_MAX, born: performance.now() };
+  }
+
+  _inArena(x, y) {
+    const dx = x - this.arena.cx, dy = y - this.arena.cy;
+    return dx*dx + dy*dy <= this.arena.r * this.arena.r;
+  }
+  _tooClose(x, y) {
+    for (const s of this.stones) {
+      if (Math.hypot(s.x - x, s.y - y) < this.MIN_SPACING) return true;
+    }
+    return false;
+  }
+
+  // ====== 카운트다운 ======
+  _countdown() {
+    const el = document.getElementById('countdown');
+    if (!el) { this._begin(); return; }
+    let n = this.M.COUNTDOWN_SEC;
+    el.style.display = 'flex'; el.textContent = n;
+    const tick = () => {
+      n--;
+      if (n <= 0) { el.style.display = 'none'; this._begin(); return; }
+      el.textContent = n;
+      setTimeout(tick, 1000);
+    };
+    setTimeout(tick, 1000);
+    requestAnimationFrame(() => this._renderOnly());
+  }
+  _begin() {
+    this.running = true;
+    this.startT = performance.now();
+    this.lastT = this.startT;
+    requestAnimationFrame((ts) => this._loop(ts));
+  }
+
+  // ====== 입력 처리 ======
+  _evToXY(e) {
+    const r = this.canvas.getBoundingClientRect();
+    const cx = e.touches ? e.touches[0].clientX : e.clientX;
+    const cy = e.touches ? e.touches[0].clientY : e.clientY;
+    return { x: cx - r.left, y: cy - r.top };
+  }
+  _evChangedXY(e) {
+    const r = this.canvas.getBoundingClientRect();
+    const t = e.changedTouches ? e.changedTouches[0] : e;
+    return { x: t.clientX - r.left, y: t.clientY - r.top };
+  }
+  _onDown(e)  { this._dragStart(this._evToXY(e)); }
+  _onMove(e)  { this._dragMove(this._evToXY(e)); }
+  _onUp(e)    { this._dragEnd(this._evChangedXY(e)); }
+  _onTouchStart(e){ if (e.touches.length===1){ e.preventDefault(); this._dragStart(this._evToXY(e)); } }
+  _onTouchMove(e){ if (this._drag){ e.preventDefault(); this._dragMove(this._evToXY(e)); } }
+  _onTouchEnd(e){ if (this._drag){ e.preventDefault(); this._dragEnd(this._evChangedXY(e)); } }
+
+  _dragStart({x, y}) {
+    this._drag = { x0:x, y0:y, x1:x, y1:y, t0:performance.now(), dragged:false };
+  }
+  _dragMove({x, y}) {
+    if (!this._drag) return;
+    this._drag.x1 = x; this._drag.y1 = y;
+    const dx = x - this._drag.x0, dy = y - this._drag.y0;
+    if (dx*dx + dy*dy > 64) this._drag.dragged = true;   // 드래그로 판단
+  }
+  _dragEnd({x, y}) {
+    if (!this.running) { this._drag = null; return; }
+    const d = this._drag;
+    this._drag = null;
+    if (!d) return;
+    const dt = performance.now() - d.t0;
+
+    if (d.dragged) {
+      // 드래그 라쏘: 사각형 안의 내 돌 다중 선택 (Set에 추가)
+      this._lassoSelect(d.x0, d.y0, d.x1, d.y1);
+      return;
+    }
+    // 짧은 탭
+    if (dt > 500) return;   // 너무 길게 누름 — 무시
+    this._tap(x, y);
+  }
+
+  _tap(x, y) {
+    const hit = this._stoneAt(x, y);
+    if (hit) {
+      if (hit.side === this.mySide) {
+        // 내 돌 → 선택 토글
+        if (this.selSet.has(hit.id)) this.selSet.delete(hit.id);
+        else this.selSet.add(hit.id);
+        return;
+      }
+      // 적 돌
+      if (this.selSet.size > 0) {
+        // 집중 공격: 선택된 돌들이 이 적만 공격
+        this.focusTarget = hit;
+        return;
+      }
+      return;   // 선택 없이 적 탭은 무시
+    }
+    // 빈 곳 — 돌 두기
+    if (!this._inArena(x, y)) { this._outsideFlash = performance.now(); return; }
+    if (this.energy[this.mySide] < this.M.STONE_COST) { this._notEnoughFlash = performance.now(); return; }
+    if (this.placeCD[this.mySide] > 0) return;
+    if (this._tooClose(x, y)) { this._tooCloseFlash = performance.now(); return; }
+    this._place(this.mySide, x, y);
+  }
+
+  _stoneAt(x, y) {
+    const r2 = this.STONE_R * this.STONE_R;
+    for (const s of this.stones) {
+      const dx = x - s.x, dy = y - s.y;
+      if (dx*dx + dy*dy <= r2) return s;
+    }
+    return null;
+  }
+
+  _lassoSelect(x0, y0, x1, y1) {
+    const xa = Math.min(x0,x1), xb = Math.max(x0,x1);
+    const ya = Math.min(y0,y1), yb = Math.max(y0,y1);
+    for (const s of this.stones) {
+      if (s.side !== this.mySide) continue;
+      if (s.x >= xa && s.x <= xb && s.y >= ya && s.y <= yb) this.selSet.add(s.id);
+    }
+  }
+  _clearSel() { this.selSet.clear(); this.focusTarget = null; }
+
+  _place(side, x, y) {
+    this.energy[side] -= this.M.STONE_COST;
+    this.placeCD[side] = this.M.PLACE_COOLDOWN;
+    const st = this._mkStone(side, x, y);
+    this.stones.push(st);
+    this._spawnFx(x, y, side);
+    if (side === this.mySide && this.pvp && this.socket) {
+      this.socket.emit('battle:action', { battleId:this.battleId, action:{ type:'place', id:st.id, x, y } });
+    }
+  }
+
+  _spawnFx(x, y, side) {
+    this._fx = this._fx || [];
+    this._fx.push({ x, y, life: 0.45, max: 0.45, side });
+  }
+
+  // ====== AI ======
+  _ai(dt) {
+    if (this.pvp) return;
+    this.aiTimer -= dt;
+    if (this.aiTimer > 0) return;
+    const S = this.M.AI_STRENGTH;
+    this.aiTimer = 0.35 + (1 - S) * 0.6 + Math.random() * 0.4;
+    const side = this.foeSide;
+    if (this.energy[side] < this.M.STONE_COST) return;
+    if (this.placeCD[side] > 0) return;
+    const pick = this._aiPickPlacement(side, S);
+    if (pick) this._place(side, pick.x, pick.y);
+  }
+  _aiPickPlacement(side, strength) {
+    const mine = this.stones.filter(s => s.side === side);
+    const foe = this.stones.filter(s => s.side !== side);
+    let best = null, bestScore = -Infinity;
+    for (let k = 0; k < 16; k++) {
+      let x, y;
+      if (foe.length && Math.random() < strength * 0.7) {
+        const t = foe[Math.random() * foe.length | 0];
+        const a = Math.random() * Math.PI * 2;
+        const r = this.MIN_SPACING + Math.random() * 30;
+        x = t.x + Math.cos(a) * r; y = t.y + Math.sin(a) * r;
+      } else if (mine.length && Math.random() < 0.5) {
+        const t = mine[Math.random() * mine.length | 0];
+        const a = Math.random() * Math.PI * 2;
+        const r = this.MIN_SPACING + Math.random() * 20;
+        x = t.x + Math.cos(a) * r; y = t.y + Math.sin(a) * r;
+      } else {
+        const sx = side === 'atk' ? -1 : 1;
+        x = this.arena.cx + sx * this.arena.r * 0.5 + (Math.random() - 0.5) * this.arena.r;
+        y = this.arena.cy + (Math.random() - 0.5) * this.arena.r * 0.9;
+      }
+      if (!this._inArena(x, y)) continue;
+      if (this._tooClose(x, y)) continue;
+      let score = 0;
+      for (const f of foe) {
+        const d = Math.hypot(f.x - x, f.y - y);
+        if (d <= this.ATTACK_RANGE * 1.5) score += (this.ATTACK_RANGE * 1.5 - d) * 0.5;
+      }
+      let near = 0;
+      for (const m of mine) if (Math.hypot(m.x - x, m.y - y) <= this.ATTACK_RANGE * 2) near++;
+      score += Math.min(near, 2) * 8;
+      score -= Math.max(0, near - 3) * 4;
+      if (score > bestScore) { bestScore = score; best = { x, y }; }
+    }
+    return best;
+  }
+
+  // ====== 시뮬레이션 한 틱 ======
+  _update(dt) {
+    // 생산 (탑 수에 비례)
+    let atkN = 0, defN = 0;
+    for (const s of this.stones) {
+      if (s.side === 'atk') atkN++; else defN++;
+    }
+    const incAtk = this.M.INCOME_PER_TOWER * (this.hero.atk ? 1 + this.M.HERO_INCOME_BONUS : 1);
+    const incDef = this.M.INCOME_PER_TOWER * (this.hero.def ? 1 + this.M.HERO_INCOME_BONUS : 1);
+    this.energy.atk = Math.min(9999, this.energy.atk + atkN * incAtk * dt);
+    this.energy.def = Math.min(9999, this.energy.def + defN * incDef * dt);
+    this.placeCD.atk = Math.max(0, this.placeCD.atk - dt);
+    this.placeCD.def = Math.max(0, this.placeCD.def - dt);
+
+    // 자동 공격: 인접 적에 데미지
+    // 집중공격 중인 내 돌은 focusTarget만 공격
+    const incoming = new Map();    // stone idx → {atk:N, def:N}
+    const focusSet = this.selSet;
+    const focusTgt = this.focusTarget;
+    const focusTgtAlive = focusTgt && this.stones.includes(focusTgt);
+    const range = this.ATTACK_RANGE + this.STONE_R * 2;
+    for (let i = 0; i < this.stones.length; i++) {
+      const a = this.stones[i];
+      const focused = (a.side === this.mySide) && focusSet.has(a.id) && focusTgtAlive;
+      if (focused) {
+        // 사거리 무관: 집중공격은 어디서든 가능 (드래그한 모든 내 돌 → 적)
+        const j = this.stones.indexOf(focusTgt);
+        focusTgt.hp -= this.M.DPS_PER_ATTACKER * dt;
+        if (!incoming.has(j)) incoming.set(j, { atk:0, def:0 });
+        incoming.get(j)[a.side]++;
+        continue;
+      }
+      // 평소: 사거리 내 모든 적
+      for (let j = 0; j < this.stones.length; j++) {
+        if (i === j) continue;
+        const b = this.stones[j];
+        if (a.side === b.side) continue;
+        if (Math.hypot(a.x - b.x, a.y - b.y) <= range) {
+          b.hp -= this.M.DPS_PER_ATTACKER * dt;
+          if (!incoming.has(j)) incoming.set(j, { atk:0, def:0 });
+          incoming.get(j)[a.side]++;
+        }
+      }
+    }
+
+    // 사망/변환 처리
+    for (let i = this.stones.length - 1; i >= 0; i--) {
+      const s = this.stones[i];
+      if (s.hp > 0) continue;
+      const inc = incoming.get(i);
+      if (!inc) { this.stones.splice(i, 1); continue; }
+      // 다수 공격자 진영으로 변환 (동수면 그냥 죽음)
+      if (inc.atk === inc.def) { this.stones.splice(i, 1); continue; }
+      const winnerSide = inc.atk > inc.def ? 'atk' : 'def';
+      if (winnerSide === s.side) {
+        this.stones.splice(i, 1);
+      } else {
+        s.side = winnerSide;
+        s.hp = this.M.FLIP_HP;
+        s.flippedAt = performance.now();
+        // 선택/집중에서도 정리
+        this.selSet.delete(s.id);
+        if (this.focusTarget === s) this.focusTarget = null;
+      }
+    }
+    // 집중 타겟이 죽어 사라졌으면 클리어
+    if (this.focusTarget && !this.stones.includes(this.focusTarget)) this.focusTarget = null;
+
+    // 이펙트
+    if (this._fx) {
+      for (let i = this._fx.length - 1; i >= 0; i--) {
+        this._fx[i].life -= dt;
+        if (this._fx[i].life <= 0) this._fx.splice(i, 1);
+      }
+    }
+
+    this._ai(dt);
+
+    // PvP 권위 동기화 — 내 돌들 상태를 주기적으로 상대에게
+    if (this.pvp && this.socket) {
+      this._netAccum += dt;
+      if (this._netAccum >= 0.2) {
+        this._netAccum = 0;
+        const mine = this.stones.filter(s => s.side === this.mySide).map(s => ({
+          id:s.id, x:s.x, y:s.y, hp:s.hp,
+        }));
+        this.socket.emit('battle:state', { battleId:this.battleId, state:{ stones: mine, energy: this.energy[this.mySide] } });
+      }
+    }
+
+    // HUD
+    document.getElementById('meE').textContent = Math.floor(this.energy[this.mySide]);
+    document.getElementById('enE').textContent = Math.floor(this.energy[this.foeSide]);
+
+    // 승패
+    if (performance.now() - this.startT > 4000) {
+      const myN = this.stones.filter(s => s.side === this.mySide).length;
+      const foeN = this.stones.filter(s => s.side === this.foeSide).length;
+      if (!myN && this.energy[this.mySide] < this.M.STONE_COST) return this._end(this.foeSide);
+      if (!foeN && this.energy[this.foeSide] < this.M.STONE_COST) return this._end(this.mySide);
+    }
+    if (performance.now() - this.startT > this.M.MAX_T * 1000) {
+      const myN = this.stones.filter(s => s.side === this.mySide).length;
+      const foeN = this.stones.filter(s => s.side === this.foeSide).length;
+      return this._end(myN >= foeN ? this.mySide : this.foeSide);
+    }
+  }
+
+  // ====== 렌더 ======
+  _render() {
+    const ctx = this.ctx;
+    ctx.fillStyle = '#0c1218';
+    ctx.fillRect(0, 0, this.W, this.H);
+    // 아레나 경계
+    const flash = performance.now() - (this._outsideFlash || 0) < 250;
+    ctx.beginPath(); ctx.arc(this.arena.cx, this.arena.cy, this.arena.r, 0, Math.PI*2);
+    ctx.fillStyle = 'rgba(20,30,40,0.4)'; ctx.fill();
+    ctx.lineWidth = flash ? 4 : 2; ctx.setLineDash([6, 6]);
+    ctx.strokeStyle = flash ? 'rgba(255,93,115,0.95)' : 'rgba(255,194,77,0.45)';
+    ctx.stroke(); ctx.setLineDash([]);
+
+    // 돌 연결선 (같은 진영, ATTACK_RANGE 안)
+    ctx.lineWidth = 1;
+    for (let i = 0; i < this.stones.length; i++) {
+      for (let j = i + 1; j < this.stones.length; j++) {
+        const a = this.stones[i], b = this.stones[j];
+        if (a.side !== b.side) continue;
+        const d = Math.hypot(a.x - b.x, a.y - b.y);
+        if (d <= this.ATTACK_RANGE + this.STONE_R * 2) {
+          const col = this._colorOf(a.side);
+          ctx.strokeStyle = `rgba(${col.rgb},0.25)`;
+          ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+        }
+      }
+    }
+
+    // 돌
+    for (const s of this.stones) {
+      const col = this._colorOf(s.side);
+      const sel = (s.side === this.mySide) && this.selSet.has(s.id);
+      const fade = Math.max(0, 1 - (performance.now() - (s.flippedAt || 0)) / 400);
+      // 본체
+      ctx.beginPath(); ctx.arc(s.x, s.y, this.STONE_R, 0, Math.PI*2);
+      ctx.fillStyle = col.f; ctx.fill();
+      ctx.lineWidth = sel ? 3 : 1.5;
+      ctx.strokeStyle = sel ? '#ffffff' : col.s;
+      ctx.stroke();
+      // 변환 직후 펄스
+      if (fade > 0) {
+        ctx.beginPath(); ctx.arc(s.x, s.y, this.STONE_R + 6 * fade, 0, Math.PI*2);
+        ctx.strokeStyle = `rgba(255,255,255,${fade})`;
+        ctx.lineWidth = 2; ctx.stroke();
+      }
+      // HP 호
+      const hpf = Math.max(0, s.hp / this.M.STONE_HP_MAX);
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, this.STONE_R + 3, -Math.PI/2, -Math.PI/2 + Math.PI*2*hpf);
+      ctx.lineWidth = 2.2; ctx.strokeStyle = col.s; ctx.stroke();
+      // 중심점
+      ctx.beginPath(); ctx.arc(s.x, s.y, 2.5, 0, Math.PI*2);
+      ctx.fillStyle = col.s; ctx.fill();
+    }
+
+    // 집중 타겟 표시
+    if (this.focusTarget) {
+      const t = this.focusTarget;
+      const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 180);
+      ctx.beginPath(); ctx.arc(t.x, t.y, this.STONE_R + 8 + pulse * 4, 0, Math.PI*2);
+      ctx.strokeStyle = `rgba(255,80,80,${0.6 + pulse * 0.4})`;
+      ctx.lineWidth = 3; ctx.setLineDash([4, 4]); ctx.stroke(); ctx.setLineDash([]);
+    }
+
+    // 드래그 라쏘
+    if (this._drag && this._drag.dragged) {
+      const d = this._drag;
+      const x = Math.min(d.x0, d.x1), y = Math.min(d.y0, d.y1);
+      const w = Math.abs(d.x1 - d.x0), h = Math.abs(d.y1 - d.y0);
+      ctx.fillStyle = 'rgba(255,255,255,0.06)';
+      ctx.fillRect(x, y, w, h);
+      ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+      ctx.lineWidth = 1; ctx.setLineDash([3, 3]);
+      ctx.strokeRect(x, y, w, h); ctx.setLineDash([]);
+    }
+
+    // 배치 이펙트
+    if (this._fx) {
+      for (const f of this._fx) {
+        const a = f.life / f.max;
+        const r = this.STONE_R * (1 + (1 - a) * 1.5);
+        const col = this._colorOf(f.side);
+        ctx.beginPath(); ctx.arc(f.x, f.y, r, 0, Math.PI*2);
+        ctx.strokeStyle = `rgba(${col.rgb}, ${a})`;
+        ctx.lineWidth = 2; ctx.stroke();
+      }
+    }
+
+    // 선택 카운트 / 집중 안내
+    if (this.selSet.size > 0) {
+      ctx.fillStyle = 'rgba(255,255,255,0.85)';
+      ctx.font = 'bold 12px monospace';
+      ctx.textAlign = 'left';
+      const hint = this.focusTarget
+        ? `▶ ${this.selSet.size}개 집중공격 중`
+        : `● ${this.selSet.size}개 선택됨 — 적을 탭해 집중공격`;
+      ctx.fillText(hint, 12, this.H - 12);
+    }
+  }
+  _renderOnly() { this._render(); }
+
+  // ====== 메인 루프 ======
+  _loop(ts) {
+    if (!this.running) return;
+    const dt = Math.min(0.05, (ts - this.lastT) / 1000);
+    this.lastT = ts;
+    if (this._update(dt) !== undefined) return;     // _end 호출됨
+    this._render();
+    requestAnimationFrame((t) => this._loop(t));
+  }
+
+  // ====== 종료 ======
+  _end(winnerSide) {
+    if (!this.running) return true;
+    this.running = false;
+    const iWon = (winnerSide === this.mySide);
+    this.onEnd(iWon ? (this.mySide === 'atk' ? 'attacker' : 'defender')
+                    : (this.mySide === 'atk' ? 'defender' : 'attacker'));
+    return true;
+  }
+
+  // ====== PvP 네트워크 ======
   _setupNet() {
     if (this._netBound) return; this._netBound = true;
     this.socket.on('battle:action', (a) => {
-      // 상대 진영의 행동을 내 시뮬에 반영
-      if (a.type === 'build') this._applyRemoteBuild(a);
-      else if (a.type === 'fire') this._applyRemoteFire(a);
+      if (a.type === 'place') {
+        // 상대(foe) 진영의 새 돌
+        this.stones.push({ id: 'r' + a.id, side: this.foeSide, x: a.x, y: a.y, hp: this.M.STONE_HP_MAX, remote:true });
+      }
     });
-    // 권위 동기화: 양쪽이 자기 진영 탑을 주기적으로 보고, 상대 것은 수신으로 갱신
-    this.socket.on('battle:state', (s) => { this._applyRemoteState(s); });
+    this.socket.on('battle:state', (s) => {
+      const mine = this.stones.filter(t => t.side === this.mySide);
+      const remote = (s.stones || []).map(t => ({ ...t, side: this.foeSide, remote: true }));
+      this.stones = mine.concat(remote);
+      if (typeof s.energy === 'number') this.energy[this.foeSide] = s.energy;
+    });
   }
-  _applyRemoteBuild(a) {
-    // 상대가 만든 탑 (상대 진영)
-    this.towers.push({ id: 'r' + a.id, side: this.foeSide, x: a.x, y: a.y, radius: a.r, maxHp: a.r, hp: a.r, remote: true });
-  }
-  _applyRemoteFire(a) {
-    const from = this.towers.find((t) => t.x != null && Math.abs(t.x - a.fx) < 2 && Math.abs(t.y - a.fy) < 2);
-    const tg = this.towers.find((t) => String(t.id) === String(a.tid));
-    if (tg) this.proj.push({ fx: a.fx, fy: a.fy, tx: tg.x, ty: tg.y, tid: tg.id, dmg: a.dmg, p: 0, dur: 0.6, side: this.foeSide });
-  }
-  _applyRemoteState(s) {
-    // 상대 진영 탑들의 위치/체력을 권위적으로 동기화 (상대가 보낸 것이 진실)
-    const mine = this.towers.filter((t) => t.side === this.mySide);
-    const remote = (s.towers || []).map((t) => ({ ...t, side: this.foeSide, remote: true }));
-    this.towers = mine.concat(remote);
-    if (typeof s.energy === 'number') this.energy[this.foeSide] = s.energy;
-  }
-
 
   _resize() {
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     const r = this.canvas.getBoundingClientRect();
     this.W = r.width; this.H = r.height;
-    this.canvas.width = r.width*dpr; this.canvas.height = r.height*dpr;
+    this.canvas.width = r.width * dpr; this.canvas.height = r.height * dpr;
     this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  }
-
-  _countdown() {
-    const el = document.getElementById('countdown');
-    el.classList.add('show');
-    let n = this.cfg.MICRO.COUNTDOWN_SEC;
-    el.textContent = n;
-    const iv = setInterval(() => {
-      n--;
-      if (n > 0) el.textContent = n;
-      else { clearInterval(iv); el.classList.remove('show'); this._begin(); }
-    }, 700);
-  }
-  _begin() {
-    this.running = true; this.startT = performance.now(); this.lastT = performance.now();
-    requestAnimationFrame((t) => this._loop(t));
-  }
-
-  // ---- 엔진 ----
-  _tProd(r){ return r * this.cfg.MICRO.PROD_COEF; }
-  _inArena(x,y){ const dx=x-this.arena.cx, dy=y-this.arena.cy; return dx*dx+dy*dy <= this.arena.r*this.arena.r; }
-  _inCore(x,y){ const dx=x-this.arena.cx, dy=y-this.arena.cy; return dx*dx+dy*dy <= this.coreR*this.coreR; }
-
-  _calcRate() {
-    const res = new Array(this.towers.length).fill(0);
-    for (let i=0;i<this.towers.length;i++){
-      const t=this.towers[i], same=this.towers.filter(o=>o.side===t.side);
-      if(!same.length){res[i]=0;continue;}
-      const N=30; let c=0;
-      for(let s=0;s<N;s++){
-        const a=Math.random()*Math.PI*2, d=Math.sqrt(Math.random())*t.radius;
-        const px=t.x+Math.cos(a)*d, py=t.y+Math.sin(a)*d; let cov=0;
-        for(const o of same){const dx=px-o.x,dy=py-o.y;if(dx*dx+dy*dy<=o.radius*o.radius)cov++;}
-        if(cov>0)c+=1/cov;
-      }
-      const mult = this._inCore(t.x,t.y) ? this.cfg.MICRO.CORE_PROD_MULT : 1;
-      res[i]=this._tProd(t.radius)*(c/N)*mult;
-    }
-    this.rate={atk:0,def:0};
-    for(let i=0;i<this.towers.length;i++) this.rate[this.towers[i].side]+=res[i];
-  }
-  _overlapArea(r1,r2,d){
-    if(d>=r1+r2)return 0;
-    if(d<=Math.abs(r1-r2))return Math.PI*Math.min(r1,r2)**2;
-    const a1=r1*r1*Math.acos((d*d+r1*r1-r2*r2)/(2*d*r1));
-    const a2=r2*r2*Math.acos((d*d+r2*r2-r1*r1)/(2*d*r2));
-    const a3=0.5*Math.sqrt((-d+r1+r2)*(d+r1-r2)*(d-r1+r2)*(d+r1+r2));
-    return a1+a2-a3;
-  }
-  _areaCombat(dt){
-    const C=this.cfg.MICRO.COMBAT_C;
-    for(let i=0;i<this.towers.length;i++)for(let j=i+1;j<this.towers.length;j++){
-      const a=this.towers[i],b=this.towers[j];if(a.side===b.side)continue;
-      const dx=a.x-b.x,dy=a.y-b.y,d=Math.sqrt(dx*dx+dy*dy);if(d>=a.radius+b.radius)continue;
-      const ov=this._overlapArea(a.radius,b.radius,d),dmg=ov*0.02*C*dt*60;
-      a.hp-=dmg;b.hp-=dmg;
-      if(Math.random()<dt*8)this.fx.push({x:(a.x+b.x)/2,y:(a.y+b.y)/2,life:.3,max:.3});
-    }
-  }
-  _build(x,y,side){
-    if(!this._inArena(x,y)){ if(side===this.mySide)this.outsideFlash=performance.now(); return false; }
-    const r = side===this.mySide ? this.selSize : (18+Math.random()*8);
-    if(this.energy[side]<r)return false;
-    this.energy[side]-=r;
-    const id=this.nextId++;
-    this.towers.push({id,side,x,y,radius:r,maxHp:r,hp:r});
-    // PvP: 내 행동을 상대에게 전송
-    if(side===this.mySide && this.pvp && this.socket)
-      this.socket.emit('battle:action',{battleId:this.battleId,action:{type:'build',id,x,y,r}});
-    return true;
-  }
-  // 같은 진영에서 영역이 (조금이라도) 겹치는 탑들. from 본인 포함.
-  // 거리 < 두 반경의 합 이면 겹침으로 본다.
-  _cluster(from){
-    return this.towers.filter(t =>
-      t.side === from.side &&
-      Math.hypot(t.x - from.x, t.y - from.y) <= t.radius + from.radius
-    );
-  }
-  // 연동 사격: 선택한 탑 + 영역 겹치는 아군 탑들이 동시에 같은 적을 향해 발사.
-  // 각자 자기 HP 35% 비용, 각자 정상 데미지. 발사는 약간씩 시차를 둬서 barrage 느낌.
-  _fireCluster(from, to){
-    const cluster = this._cluster(from);
-    let i = 0;
-    for (const t of cluster) {
-      const delay = i * 60;  // 60ms 시차
-      if (delay === 0) this._fire(t, to);
-      else setTimeout(() => { if (this.running && this.towers.includes(t) && this.towers.includes(to)) this._fire(t, to); }, delay);
-      i++;
-    }
-  }
-  _fire(from,to){
-    const dx=to.x-from.x,dy=to.y-from.y,d=Math.sqrt(dx*dx+dy*dy);
-    const cost=Math.floor(from.hp*this.cfg.MICRO.RANGED_COST_RATIO);if(cost<3)return;
-    const fall=Math.max(0.15,1-d/700);from.hp-=cost;
-    const dmg=cost*fall;
-    this.proj.push({fx:from.x,fy:from.y,tx:to.x,ty:to.y,tid:to.id,dmg,p:0,dur:0.6+d/500,side:from.side});
-    if(from.side===this.mySide && this.pvp && this.socket)
-      this.socket.emit('battle:action',{battleId:this.battleId,action:{type:'fire',fx:from.x,fy:from.y,tid:to.id,dmg}});
-  }
-  _towerAt(x,y){ for(const t of this.towers){const dx=x-t.x,dy=y-t.y;if(dx*dx+dy*dy<=t.radius*t.radius)return t;} return null; }
-
-  _ai(dt){
-    // PvP면 AI 동작 안 함 (상대가 사람)
-    if(this.pvp)return;
-    this.aiTimer-=dt; if(this.aiTimer>0)return;
-    const S=this.cfg.MICRO.AI_STRENGTH, champ=this.cfg.MICRO.CHAMPION;
-    this.aiTimer = 0.4+(1-S)*1.6 + Math.random()*1.0;
-    const ai=this.foeSide;  // AI가 조작하는 진영 = 상대
-    const mine=this.towers.filter(t=>t.side===ai), foe=this.towers.filter(t=>t.side===this.mySide);
-    // 사격: 클러스터 크기가 큰 자기 탑을 선택해 화력 최대화
-    if(mine.length && foe.length && Math.random()<S*(champ.snipe ?? 0.5)){
-      let bestFrom = mine[0], bestSize = this._cluster(bestFrom).length;
-      for (const t of mine) {
-        const sz = this._cluster(t).length;
-        if (sz > bestSize) { bestFrom = t; bestSize = sz; }
-      }
-      if(bestFrom.hp/bestFrom.maxHp>=champ.rangedThresh){
-        this._fireCluster(bestFrom, foe.slice().sort((a,b)=>a.hp-b.hp)[0]);
-        return;
-      }
-    }
-    if(mine.length>=champ.maxTowers)return;
-    const r = S>0.5 ? champ.towerSize+Math.random()*8 : 30+Math.random()*20;
-    if(this.energy[ai]<r)return;
-    let best=null,bs=-1e9; const cand=4+Math.round(S*8);
-    const clusterPref = champ.clusterPref ?? 0.5;
-    for(let k=0;k<cand;k++){
-      let bx,by;
-      if(Math.random()<S){ bx=this.arena.cx+(Math.random()-0.5)*this.coreR*1.5; by=this.arena.cy+(Math.random()-0.5)*this.coreR*1.5; }
-      else if(mine.length){ const b=mine[Math.random()*mine.length|0]; bx=b.x+(Math.random()-0.5)*120; by=b.y+(Math.random()-0.5)*120; }
-      else { bx=this.arena.cx; by=this.arena.cy; }
-      if(!this._inArena(bx,by))continue;
-      let score=0; const dc=Math.hypot(bx-this.arena.cx,by-this.arena.cy);
-      if(dc<=this.coreR)score+=100;else score+=Math.max(0,this.arena.r-dc)*0.1;
-      // 클러스터 메커니즘 반영: 아군 겹침은 (생산↓페널티) + (클러스터화력↑보너스)
-      for(const o of mine){
-        const dx=bx-o.x,dy=by-o.y,dist=Math.hypot(dx,dy);
-        if(dist<r+o.radius){
-          score-=(champ.allyAvoid ?? S)*(r+o.radius-dist)*3;
-          score+=clusterPref*1.5;
-        }
-      }
-      if(score>bs){bs=score;best={bx,by};}
-    }
-    if(best)this._build(best.bx,best.by,ai);
-  }
-
-  _update(dt){
-    this._calcRate();
-    this.energy.atk=Math.min(9999,this.energy.atk+this.rate.atk*dt);
-    this.energy.def=Math.min(9999,this.energy.def+this.rate.def*dt);
-    this._areaCombat(dt);
-    for(let i=this.proj.length-1;i>=0;i--){
-      const p=this.proj[i],tg=this.towers.find(t=>t.id===p.tid);
-      if(!tg){this.proj.splice(i,1);continue;}
-      p.p+=dt/p.dur;
-      if(p.p>=1){tg.hp-=p.dmg;this.fx.push({x:tg.x,y:tg.y,life:.5,max:.5,big:true});this.proj.splice(i,1);continue;}
-      p.cx=p.fx+(tg.x-p.fx)*p.p; p.cy=p.fy+(tg.y-p.fy)*p.p;
-    }
-    for(let i=this.towers.length-1;i>=0;i--) if(this.towers[i].hp<=0){
-      if(this.towers[i]===this.selTower)this.selTower=null;
-      this.fx.push({x:this.towers[i].x,y:this.towers[i].y,life:.8,max:.8,big:true});
-      this.towers.splice(i,1);
-    }
-    for(let i=this.fx.length-1;i>=0;i--){this.fx[i].life-=dt;if(this.fx[i].life<=0)this.fx.splice(i,1);}
-    this._ai(dt);
-    // PvP: 내 진영 상태를 주기적으로 상대에게 전송 (권위 동기화)
-    if(this.pvp && this.socket){
-      this._netAccum += dt;
-      if(this._netAccum >= 0.15){ this._netAccum = 0;
-        const myTowers = this.towers.filter(t=>t.side===this.mySide)
-          .map(t=>({id:t.id,x:t.x,y:t.y,radius:t.radius,maxHp:t.maxHp,hp:t.hp}));
-        this.socket.emit('battle:state',{battleId:this.battleId,state:{towers:myTowers,energy:this.energy[this.mySide]}});
-      }
-    }
-    // HUD — 내 진영/상대 진영 기준
-    document.getElementById('meE').textContent=Math.floor(this.energy[this.mySide]);
-    document.getElementById('enE').textContent=Math.floor(this.energy[this.foeSide]);
-    // 펜딩 상태일 때 에너지 변화 따라 비용/버튼 갱신
-    if (this.pendingPlace) this._updateSizeCost();
-    const c=this.selSize, el=document.getElementById('sizeCost');
-    el.textContent='비용 '+c;
-    // 승패 (attacker/defender 절대 기준 유지 — 서버와 일치)
-    if(performance.now()-this.startT>4000){
-      const a=this.towers.some(t=>t.side==='atk'), d=this.towers.some(t=>t.side==='def');
-      if(!a&&this.energy.atk<15)return this._end('defender');
-      if(!d&&this.energy.def<15)return this._end('attacker');
-    }
-    if(performance.now()-this.startT>90000){
-      const ha=this.towers.filter(t=>t.side==='atk').reduce((s,t)=>s+t.hp,0);
-      const hd=this.towers.filter(t=>t.side==='def').reduce((s,t)=>s+t.hp,0);
-      this._end(ha>=hd?'attacker':'defender');
-    }
-  }
-
-  _render(){
-    const ctx=this.ctx, M=this.cfg.MICRO;
-    ctx.fillStyle='#0d1420';ctx.fillRect(0,0,this.W,this.H);
-    // 아레나 밖 어둡게
-    ctx.save();
-    ctx.beginPath();ctx.rect(0,0,this.W,this.H);
-    ctx.arc(this.arena.cx,this.arena.cy,this.arena.r,0,Math.PI*2,true);
-    ctx.fillStyle='rgba(6,9,13,0.55)';ctx.fill('evenodd');
-    const flash=performance.now()-(this.outsideFlash||0)<400;
-    ctx.beginPath();ctx.arc(this.arena.cx,this.arena.cy,this.arena.r,0,Math.PI*2);
-    ctx.lineWidth=flash?4:2;ctx.setLineDash([8,6]);
-    ctx.strokeStyle=flash?'rgba(255,93,115,0.95)':'rgba(255,194,77,0.5)';ctx.stroke();ctx.setLineDash([]);
-    // 노른자
-    const pulse=0.5+0.5*Math.sin(performance.now()/500);
-    ctx.beginPath();ctx.arc(this.arena.cx,this.arena.cy,this.coreR,0,Math.PI*2);
-    ctx.fillStyle=`rgba(255,194,77,${0.08+pulse*0.06})`;ctx.fill();
-    ctx.beginPath();ctx.arc(this.arena.cx,this.arena.cy,this.coreR,0,Math.PI*2);
-    ctx.lineWidth=1.5;ctx.setLineDash([4,4]);ctx.strokeStyle=`rgba(255,194,77,${0.4+pulse*0.3})`;ctx.stroke();ctx.setLineDash([]);
-    ctx.fillStyle='rgba(255,210,120,0.9)';ctx.font='bold 10px monospace';ctx.textAlign='center';
-    ctx.fillText('⭐생산'+M.CORE_PROD_MULT+'배',this.arena.cx,this.arena.cy+3);
-    ctx.restore();
-    // 클러스터 강조 — 선택 탑이 있으면 동시발사 후보를 점선 강조
-    const clusterSet = this.selTower
-      ? new Set(this._cluster(this.selTower))
-      : null;
-    // 탑
-    for(const t of this.towers){
-      const col=this._colorOf(t.side);
-      ctx.beginPath();ctx.arc(t.x,t.y,t.radius,0,Math.PI*2);ctx.fillStyle=col.f;ctx.fill();
-      // 클러스터 멤버 (선택 탑 자신 제외) → 점선 흰 외곽
-      if (clusterSet && clusterSet.has(t) && t !== this.selTower) {
-        ctx.save();
-        ctx.setLineDash([5,4]);
-        ctx.strokeStyle='rgba(255,255,255,0.85)'; ctx.lineWidth=2;
-        ctx.beginPath();ctx.arc(t.x,t.y,t.radius+2,0,Math.PI*2);ctx.stroke();
-        ctx.restore();
-      }
-      ctx.lineWidth=t===this.selTower?3:1.5;ctx.strokeStyle=t===this.selTower?'#fff':col.s;ctx.stroke();
-      const hpf=Math.max(0,t.hp/t.maxHp);
-      ctx.beginPath();ctx.arc(t.x,t.y,t.radius+4,-Math.PI/2,-Math.PI/2+Math.PI*2*hpf);
-      ctx.lineWidth=2.5;ctx.strokeStyle=col.s;ctx.stroke();
-      ctx.beginPath();ctx.arc(t.x,t.y,4,0,Math.PI*2);ctx.fillStyle=col.s;ctx.fill();
-    }
-    for(const p of this.proj){
-      ctx.beginPath();ctx.arc(p.cx||p.fx,p.cy||p.fy,4,0,Math.PI*2);ctx.fillStyle='#ffeeaa';ctx.fill();
-    }
-    for(const f of this.fx){const a=f.life/f.max;
-      ctx.beginPath();ctx.arc(f.x,f.y,(f.big?14:6)*(1.4-a),0,Math.PI*2);
-      ctx.fillStyle=`rgba(255,255,255,${a*0.5})`;ctx.fill();}
-    // 건설 후보 위치 미리보기
-    if(this.pendingPlace){
-      const myCol=this._colorOf(this.mySide);
-      const t=(performance.now()%1200)/1200;
-      const pulse=this.selSize*(1+t*0.05);
-      ctx.save();
-      // 점선 윤곽 (반경 = 현재 선택 크기)
-      ctx.setLineDash([6,5]);
-      ctx.beginPath();ctx.arc(this.pendingPlace.x,this.pendingPlace.y,pulse,0,Math.PI*2);
-      ctx.strokeStyle=myCol.s;ctx.lineWidth=2;ctx.stroke();
-      ctx.setLineDash([]);
-      // 채움 반투명
-      ctx.beginPath();ctx.arc(this.pendingPlace.x,this.pendingPlace.y,this.selSize,0,Math.PI*2);
-      ctx.fillStyle=`rgba(${myCol.rgb},${0.10+0.08*(1-t)})`;ctx.fill();
-      // 중심 십자
-      ctx.strokeStyle='#fff';ctx.lineWidth=1.5;
-      ctx.beginPath();
-      ctx.moveTo(this.pendingPlace.x-6,this.pendingPlace.y);ctx.lineTo(this.pendingPlace.x+6,this.pendingPlace.y);
-      ctx.moveTo(this.pendingPlace.x,this.pendingPlace.y-6);ctx.lineTo(this.pendingPlace.x,this.pendingPlace.y+6);
-      ctx.stroke();
-      ctx.restore();
-    }
-  }
-
-  _loop(ts){
-    if(!this.running)return;
-    const dt=Math.min(0.05,(ts-this.lastT)/1000||0);this.lastT=ts;
-    this._update(dt);this._render();
-    if(this.running)requestAnimationFrame((t)=>this._loop(t));
-  }
-
-  _onClick(e){
-    if(!this.running)return;
-    const r=this.canvas.getBoundingClientRect();
-    const x=e.clientX-r.left,y=e.clientY-r.top;
-    const hit=this._towerAt(x,y);
-    const hint=document.getElementById('modeHint');
-    const ME=this.mySide, FOE=this.foeSide;
-    // ── 모드 1: 내 탑 선택됨 → 적 탑 탭으로 사격, 다른 내 탑 탭으로 선택 전환, 그 외는 무시
-    if(this.selTower){
-      if(hit&&hit.side===FOE){this._fireCluster(this.selTower,hit);this.selTower=null;hint.textContent='중앙 노른자를 차지하라';return;}
-      if(hit&&hit.side===ME){this.selTower=hit;return;}
-      this.selTower=null;hint.textContent='중앙 노른자를 차지하라';return;
-    }
-    // ── 모드 2: 내 탑 탭 → 사격 모드 진입
-    if(hit&&hit.side===ME){
-      // 건설 후보 있었으면 취소 (배타적)
-      if(this.pendingPlace) this._cancelPlace();
-      this.selTower=hit;
-      const n = this._cluster(hit).length;
-      hint.textContent = n > 1
-        ? `적 탑 탭=클러스터 사격 (아군 ${n}개 동시 발사)`
-        : '적 탑 탭=장거리 공격';
-      return;
-    }
-    // ── 모드 3: 빈 곳 탭 → 건설 후보 위치 표시 (확정은 버튼)
-    if(!this._inArena(x,y)){ this.outsideFlash=performance.now(); return; }
-    this.pendingPlace={x,y};
-    this._showPlacementUI(true);
-    this._updateSizeCost();
-    hint.textContent='크기 정하고 [건설] 누르기 — 다른 곳 탭으로 위치 이동';
-  }
-
-  _end(winner){
-    if(!this.running)return;
-    this.running=false;
-    this.onEnd(winner);
   }
 }

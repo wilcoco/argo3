@@ -1,210 +1,169 @@
 // ============================================================
-//  마이크로 전투 엔진 (서버 권위 판정)
-//  06_full 엔진 + 중앙 노른자 + 진화 챔피언 AI.
-//  클라이언트가 실시간 렌더링하되, 최종 승패는 서버가 이 엔진으로 검증.
-//  베팅이 시작 에너지(전력)가 되고, 한쪽 전멸 시 결판.
+//  마이크로 전투 엔진 (서버 권위 판정) — 바둑·오델로식
+//  · 균일 돌, 자동 공격, 만렙 변환, 탑별 생산
+//  · AI 폴백 결과 판정에 사용 (도전자 미응답 → 서버가 양쪽 AI로 시뮬)
+//  · 시그니처는 기존 그대로: simulateBattle(atkBet, defBet, opts)
 // ============================================================
 import { CONFIG } from './config.js';
 
 const M = CONFIG.MICRO;
-const ARENA_R = 230;            // 정규화 아레나 반경 (서버 판정용 고정)
+const ARENA_R = 230;
 const DT = 1 / 30;
-const MAX_T = 90;
+const MAX_T = M.MAX_T;
+const STONE_R = M.STONE_R;
+const MIN_SPACING = M.STONE_R * M.MIN_SPACING_FACTOR;
+const ATTACK_RANGE = M.STONE_R * M.ATTACK_RANGE_FACTOR;
 
-const tCost = (r) => r;
-const tProd = (r) => r * M.PROD_COEF;
-const tHp = (r) => r;
+function dist(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
 
-function overlapArea(r1, r2, d) {
-  if (d >= r1 + r2) return 0;
-  if (d <= Math.abs(r1 - r2)) return Math.PI * Math.min(r1, r2) ** 2;
-  const a1 = r1 * r1 * Math.acos((d * d + r1 * r1 - r2 * r2) / (2 * d * r1));
-  const a2 = r2 * r2 * Math.acos((d * d + r2 * r2 - r1 * r1) / (2 * d * r2));
-  const a3 = 0.5 * Math.sqrt((-d + r1 + r2) * (d + r1 - r2) * (d - r1 + r2) * (d + r1 + r2));
-  return a1 + a2 - a3;
-}
-
-// 한 명의 봇 전략 (유전자 기반). 챔피언을 약화시켜 자동방어로 사용.
-function makeBot(gene, strength = 1) {
-  return {
-    gene,
-    strength,
-    cd: 0,
-  };
-}
-
-// 서버 권위 전투: 도전자(베팅 atkBet) vs 방어자(베팅 defBet, AI)
-// 양쪽 다 AI로 시뮬해 승패를 정한다. (실시간 클라 입력은 별도 동기화)
-// 도전자 측엔 약간의 인간 우위(플레이어가 직접 조작)를 부여할 수 있음.
 export function simulateBattle(atkBet, defBet, opts = {}) {
-  const playerSkill = opts.playerSkill ?? 0.5;     // 0~1, 도전자(인간) 실력
+  const playerSkill = opts.playerSkill ?? 0.85;
   const aiStrength = opts.aiStrength ?? M.AI_STRENGTH;
+  const proximity = opts.proximity || { atk: 0, def: 0 };
+  const hero = opts.hero || { atk: false, def: false };
 
-  let towers = [];
-  let projectiles = [];
+  const stones = [];
   let nextId = 0;
   const energy = { atk: atkBet, def: defBet };
-  const champ = M.CHAMPION;
+  const placeCD = { atk: 0, def: 0 };
 
-  // 시작 거점
-  function addTower(side, x, y, r) {
-    if (x * x + y * y > ARENA_R * ARENA_R) return false;
-    const e = side === 'atk' ? 'atk' : 'def';
-    if (energy[e] < tCost(r)) return false;
-    energy[e] -= tCost(r);
-    towers.push({ id: nextId++, side, x, y, radius: r, maxHp: tHp(r), hp: tHp(r) });
+  function tooClose(x, y) {
+    for (const s of stones) if (Math.hypot(s.x - x, s.y - y) < MIN_SPACING) return true;
+    return false;
+  }
+  function inArena(x, y) { return x*x + y*y <= ARENA_R * ARENA_R; }
+  function place(side, x, y, free = false) {
+    if (!inArena(x, y) || tooClose(x, y)) return false;
+    if (!free) {
+      if (energy[side] < M.STONE_COST) return false;
+      if (placeCD[side] > 0) return false;
+      energy[side] -= M.STONE_COST;
+      placeCD[side] = M.PLACE_COOLDOWN;
+    }
+    stones.push({ id: nextId++, side, x, y, hp: M.STONE_HP_MAX });
     return true;
   }
-  addTower('atk', -ARENA_R * 0.45, 0, 25);
-  addTower('def', ARENA_R * 0.45, 0, 25);
 
-  const sideTowers = (s) => towers.filter((t) => t.side === s);
-
-  function calcRate() {
-    const res = new Array(towers.length).fill(0);
-    for (let i = 0; i < towers.length; i++) {
-      const t = towers[i];
-      const same = towers.filter((o) => o.side === t.side);
-      const N = 16; let c = 0;
-      for (let s = 0; s < N; s++) {
-        const a = Math.random() * Math.PI * 2, d = Math.sqrt(Math.random()) * t.radius;
-        const px = t.x + Math.cos(a) * d, py = t.y + Math.sin(a) * d;
-        let cov = 0;
-        for (const o of same) { const dx = px - o.x, dy = py - o.y; if (dx*dx+dy*dy <= o.radius*o.radius) cov++; }
-        if (cov > 0) c += 1 / cov;
-      }
-      // 중앙 노른자 보너스
-      const inCore = (t.x*t.x + t.y*t.y) <= (ARENA_R*M.CORE_RADIUS_FRAC)**2;
-      res[i] = tProd(t.radius) * (c / N) * (inCore ? M.CORE_PROD_MULT : 1);
+  // 시작 돌 — 양 끝 + 보급선
+  function seed(side, sign, extra) {
+    const baseX = sign * ARENA_R * 0.65;
+    const total = 1 + Math.min(extra || 0, M.PROXIMITY_BONUS_MAX);
+    const spread = MIN_SPACING * 1.05;
+    for (let i = 0; i < total; i++) {
+      const off = (i - (total - 1) / 2) * spread;
+      place(side, baseX, off, true);
     }
-    let ra = 0, rd = 0;
-    for (let i = 0; i < towers.length; i++) (towers[i].side === 'atk' ? (ra += res[i]) : (rd += res[i]));
-    return { atk: ra, def: rd };
   }
+  seed('atk', -1, proximity.atk);
+  seed('def',  1, proximity.def);
 
-  function areaCombat(dt) {
-    const C = M.COMBAT_C;
-    for (let i = 0; i < towers.length; i++)
-      for (let j = i + 1; j < towers.length; j++) {
-        const a = towers[i], b = towers[j];
-        if (a.side === b.side) continue;
-        const dx = a.x - b.x, dy = a.y - b.y, d = Math.sqrt(dx*dx+dy*dy);
-        if (d >= a.radius + b.radius) continue;
-        const ov = overlapArea(a.radius, b.radius, d);
-        const dmg = ov * 0.02 * C * dt * 60;
-        a.hp -= dmg; b.hp -= dmg;
-      }
-  }
-
-  // 영역 겹친 아군 = 같은 클러스터. from 본인 포함.
-  function cluster(from) {
-    return towers.filter((t) =>
-      t.side === from.side &&
-      Math.hypot(t.x - from.x, t.y - from.y) <= t.radius + from.radius
-    );
-  }
-
-  // 단발 사격 (본인 HP 35% 소모, 거리 비례 감쇠)
-  function fire(from, to) {
-    if (!towers.includes(from) || !towers.includes(to)) return;
-    const cost = Math.floor(from.hp * M.RANGED_COST_RATIO);
-    if (cost < 3) return;
-    const d = Math.hypot(to.x - from.x, to.y - from.y);
-    const fall = Math.max(0.15, 1 - d / 700);
-    from.hp -= cost;
-    to.hp -= cost * fall;
-  }
-  // 클러스터 사격 (선택 탑 + 영역 겹친 아군이 동시 발사)
-  function fireCluster(from, to) {
-    for (const t of cluster(from)) fire(t, to);
-  }
-
-  // 봇 행동 (도전자/방어자 공통, 강도로 차등)
-  function act(side, strength) {
-    const mine = sideTowers(side);
-    const foe = sideTowers(side === 'atk' ? 'def' : 'atk');
-    const e = side;
-    // 사격 분기 — 챔피언의 snipe 비율로 사격 시도
-    if (mine.length && foe.length && Math.random() < strength * champ.snipe) {
-      // 클러스터가 가장 큰 자기 탑 선택 (화력 최대화)
-      let best = mine[0], bestSize = cluster(best).length;
-      for (const t of mine) {
-        const sz = cluster(t).length;
-        if (sz > bestSize) { best = t; bestSize = sz; }
-      }
-      // 사격 임계: 본인 HP가 충분할 때만
-      if (best.hp / best.maxHp >= champ.rangedThresh) {
-        // 목표: 체력 낮은 적 (마무리)
-        const target = foe.slice().sort((a, b) => a.hp - b.hp)[0];
-        fireCluster(best, target);
-        return;  // 한 행동 = 한 사격 또는 한 빌드
-      }
-    }
-    // 빌드 분기
-    if (mine.length >= champ.maxTowers) return;
-    const r = strength > 0.5 ? champ.towerSize + Math.random()*8 : 30 + Math.random()*20;
-    if (energy[e] < tCost(r)) return;
-    const coreR = ARENA_R * M.CORE_RADIUS_FRAC;
-    let best = null, bestScore = -1e9;
-    const cand = 4 + Math.round(strength * 8);
-    for (let k = 0; k < cand; k++) {
+  function pickPlacement(side, strength) {
+    const mine = stones.filter(s => s.side === side);
+    const foe = stones.filter(s => s.side !== side);
+    let best = null, bestScore = -Infinity;
+    for (let k = 0; k < 16; k++) {
       let x, y;
-      if (Math.random() < strength) {
-        x = (Math.random()-0.5)*coreR*1.5; y = (Math.random()-0.5)*coreR*1.5;
-      } else if (mine.length) {
-        const base = mine[Math.random()*mine.length|0];
-        x = base.x + (Math.random()-0.5)*120; y = base.y + (Math.random()-0.5)*120;
+      if (foe.length && Math.random() < strength * 0.7) {
+        const t = foe[Math.random() * foe.length | 0];
+        const a = Math.random() * Math.PI * 2;
+        const r = MIN_SPACING + Math.random() * 30;
+        x = t.x + Math.cos(a) * r; y = t.y + Math.sin(a) * r;
+      } else if (mine.length && Math.random() < 0.5) {
+        const t = mine[Math.random() * mine.length | 0];
+        const a = Math.random() * Math.PI * 2;
+        const r = MIN_SPACING + Math.random() * 20;
+        x = t.x + Math.cos(a) * r; y = t.y + Math.sin(a) * r;
       } else {
         const sx = side === 'atk' ? -1 : 1;
-        x = sx*ARENA_R*0.4 + (Math.random()-0.5)*60; y = (Math.random()-0.5)*60;
+        x = sx * ARENA_R * 0.5 + (Math.random() - 0.5) * ARENA_R * 0.8;
+        y = (Math.random() - 0.5) * ARENA_R * 0.9;
       }
-      if (x*x + y*y > ARENA_R*ARENA_R) continue;
+      if (!inArena(x, y) || tooClose(x, y)) continue;
       let score = 0;
-      const dc = Math.hypot(x, y);
-      if (dc <= coreR) score += 100; else score += Math.max(0, ARENA_R - dc) * 0.1;
-      // 아군 겹침 — allyAvoid가 페널티 강도. 새 규칙(클러스터 화력)에선 약하게.
-      // 두 효과 동시: 약한 페널티(생산↓) + 약한 보너스(클러스터 잠재력↑)
-      for (const o of mine) {
-        const dx = x-o.x, dy = y-o.y, dist = Math.hypot(dx, dy);
-        if (dist < r+o.radius) {
-          score -= (champ.allyAvoid ?? strength) * (r+o.radius-dist) * 3;
-          score += champ.clusterPref * 1.5; // 클러스터링 보너스 (새 챔피언 유전자)
-        }
+      for (const f of foe) {
+        const d = Math.hypot(f.x - x, f.y - y);
+        if (d <= ATTACK_RANGE * 1.5) score += (ATTACK_RANGE * 1.5 - d) * 0.5;
       }
+      let near = 0;
+      for (const m of mine) if (Math.hypot(m.x - x, m.y - y) <= ATTACK_RANGE * 2) near++;
+      score += Math.min(near, 2) * 8;
+      score -= Math.max(0, near - 3) * 4;
       if (score > bestScore) { bestScore = score; best = { x, y }; }
     }
-    if (best) addTower(side, best.x, best.y, r);
+    return best;
   }
 
   let t = 0;
   const startGrace = 4;
   while (t < MAX_T) {
     t += DT;
-    const rate = calcRate();
-    energy.atk = Math.min(9999, energy.atk + rate.atk * DT);
-    energy.def = Math.min(9999, energy.def + rate.def * DT);
-    areaCombat(DT);
-    // 사망
-    for (let i = towers.length - 1; i >= 0; i--) if (towers[i].hp <= 0) towers.splice(i, 1);
-    // 행동: 도전자는 playerSkill, 방어자는 aiStrength
-    act('atk', playerSkill);
-    act('def', aiStrength);
+    // 생산
+    let atkN = 0, defN = 0;
+    for (const s of stones) (s.side === 'atk' ? atkN++ : defN++);
+    const incAtk = M.INCOME_PER_TOWER * (hero.atk ? 1 + M.HERO_INCOME_BONUS : 1);
+    const incDef = M.INCOME_PER_TOWER * (hero.def ? 1 + M.HERO_INCOME_BONUS : 1);
+    energy.atk = Math.min(9999, energy.atk + atkN * incAtk * DT);
+    energy.def = Math.min(9999, energy.def + defN * incDef * DT);
+    placeCD.atk = Math.max(0, placeCD.atk - DT);
+    placeCD.def = Math.max(0, placeCD.def - DT);
+
+    // 자동 공격
+    const incoming = new Map();
+    const range = ATTACK_RANGE + STONE_R * 2;
+    for (let i = 0; i < stones.length; i++) {
+      for (let j = 0; j < stones.length; j++) {
+        if (i === j) continue;
+        const a = stones[i], b = stones[j];
+        if (a.side === b.side) continue;
+        if (Math.hypot(a.x - b.x, a.y - b.y) <= range) {
+          b.hp -= M.DPS_PER_ATTACKER * DT;
+          if (!incoming.has(j)) incoming.set(j, { atk:0, def:0 });
+          incoming.get(j)[a.side]++;
+        }
+      }
+    }
+    // 사망/변환
+    for (let i = stones.length - 1; i >= 0; i--) {
+      const s = stones[i];
+      if (s.hp > 0) continue;
+      const inc = incoming.get(i);
+      if (!inc || inc.atk === inc.def) { stones.splice(i, 1); continue; }
+      const winnerSide = inc.atk > inc.def ? 'atk' : 'def';
+      if (winnerSide === s.side) {
+        stones.splice(i, 1);
+      } else {
+        s.side = winnerSide;
+        s.hp = M.FLIP_HP;
+      }
+    }
+
+    // 양쪽 봇 행동
+    for (const side of ['atk', 'def']) {
+      const strength = side === 'atk' ? playerSkill : aiStrength;
+      if (energy[side] >= M.STONE_COST && placeCD[side] <= 0 && Math.random() < 0.85) {
+        const pick = pickPlacement(side, strength);
+        if (pick) place(side, pick.x, pick.y);
+      }
+    }
+
     // 승패
     if (t > startGrace) {
-      const atkHas = sideTowers('atk').length, defHas = sideTowers('def').length;
-      if (!atkHas && energy.atk < 15) return { winner: 'defender', t };
-      if (!defHas && energy.def < 15) return { winner: 'attacker', t };
+      const an = stones.filter(s => s.side === 'atk').length;
+      const dn = stones.filter(s => s.side === 'def').length;
+      if (!an && energy.atk < M.STONE_COST) return { winner: 'defender', t };
+      if (!dn && energy.def < M.STONE_COST) return { winner: 'attacker', t };
     }
   }
-  // 타임아웃: 총 체력 비교
-  const ha = sideTowers('atk').reduce((s, x) => s + x.hp, 0);
-  const hd = sideTowers('def').reduce((s, x) => s + x.hp, 0);
-  return { winner: ha >= hd ? 'attacker' : 'defender', t };
+  // 타임아웃 — 다수 승
+  const an = stones.filter(s => s.side === 'atk').length;
+  const dn = stones.filter(s => s.side === 'def').length;
+  return { winner: an >= dn ? 'attacker' : 'defender', t };
 }
 
-// 승률 추정 (여러 번 시뮬해 평균) — 매칭/표시용
-export function estimateWinProb(atkBet, defBet, opts = {}, runs = 9) {
+export function estimateWinProb(atkBet, defBet, opts = {}, runs = 5) {
   let w = 0;
-  for (let i = 0; i < runs; i++) if (simulateBattle(atkBet, defBet, opts).winner === 'attacker') w++;
+  for (let i = 0; i < runs; i++) {
+    if (simulateBattle(atkBet, defBet, opts).winner === 'attacker') w++;
+  }
   return w / runs;
 }

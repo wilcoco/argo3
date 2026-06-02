@@ -51,34 +51,31 @@ export const CONFIG = {
     CHALLENGER_RESPONSE_SEC: 30, // 큐에서 차례 됐을 때 응답 대기. 미응답 시 다음으로.
   },
 
-  // ---- 마이크로 (실시간 전투) ----
+  // ---- 마이크로 (실시간 전투) — 바둑·오델로식 ----
   MICRO: {
     BATTLE_ZOOM: 17,
     ARENA_RATIO: 0.42,         // 아레나 반경 = min(W,H) * 이 값
-    CORE_RADIUS_FRAC: 0.28,    // 중앙 노른자 반경 비율
-    CORE_PROD_MULT: 2.0,       // 노른자 생산 배율
-    PROD_COEF: 0.04,           // 생산 = 탑반경 * 이값
-    RANGED_COST_RATIO: 0.35,   // 장거리공격 비용 = 체력 * 이값
-    TOWER_MIN: 15,
-    TOWER_MAX: 70,
-    COMBAT_C: 0.012,           // 영역겹침 데미지 계수
     COUNTDOWN_SEC: 3,
     DEFENSE_WAIT_SEC: 15,      // 방어자 응답 대기 시간 (초). 미응답 시 AI 폴백.
-    AI_STRENGTH: 0.6,          // 자동방어 AI 강도 (0~1, 진화챔피언 기반)
-    PROXIMITY_RADIUS_M: 800,   // 마이크로 시작 보너스 계산 반경 (이 안의 내 셀이 영향)
-    PROXIMITY_BONUS_PER: 0.10, // 셀당 시작 탑 크기 +10%
-    PROXIMITY_BONUS_MAX: 0.6,  // 최대 +60% (6셀 이상부터 캡)
-    // 진화 챔피언 유전자 (자동방어 두뇌) — 클러스터 사격 메커니즘에 맞춰 갱신
-    CHAMPION: {
-      towerSize: 17,         // 작은 탑 다수 → 클러스터 화력 극대화
-      aggression: 0.87,
-      allyAvoid: 0.20,       // 겹침 회피 약화 — 클러스터링 허용
-      enemySeek: 0.06,
-      rangedThresh: 0.75,    // HP 75% 이상이면 사격 (빈번)
-      snipe: 0.55,           // 사격 빈도 ↑
-      maxTowers: 14,         // 작은 탑 많이
-      clusterPref: 1.2,      // 클러스터 선호도 (새 유전자) — 겹침 시 보너스
-    },
+    AI_STRENGTH: 0.85,         // 자동방어 AI 강도
+
+    // 돌(탑) 균일 — 크기·HP·비용 고정
+    STONE_R: 18,               // 돌 반경 (px)
+    STONE_HP_MAX: 30,
+    STONE_COST: 15,
+    FLIP_HP: 30,               // 변환 시 부활 HP (= 만렙)
+    MIN_SPACING_FACTOR: 2.2,   // 돌 사이 최소 거리 = STONE_R × 이값 (겹침 금지)
+    ATTACK_RANGE_FACTOR: 2.0,  // 자동 공격 사거리 = STONE_R × 이값 (≈ 인접)
+    DPS_PER_ATTACKER: 1.5,     // 공격자 1명당 초당 데미지
+    INCOME_PER_TOWER: 0.4,     // 탑 1개당 초당 에너지 생산 (탑 많을수록 지수 성장)
+    PLACE_COOLDOWN: 0.4,       // 돌 두기 행동 쿨다운 (초) — 봇/연속 탭 제한
+    MAX_T: 120,                // 전투 시간 상한 (초). 타임아웃 시 다수 승.
+
+    // 시작 보너스
+    PROXIMITY_RADIUS_M: 800,
+    PROXIMITY_BONUS_PER: 1,    // 보급선 1셀당 시작 돌 +1개
+    PROXIMITY_BONUS_MAX: 4,    // 최대 +4개
+    HERO_INCOME_BONUS: 0.5,    // 영웅 진영 INCOME +50%
   },
 
   // ---- 베팅 경제 (명세서 6장) ----
