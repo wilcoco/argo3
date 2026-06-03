@@ -67,7 +67,18 @@ export const CONFIG = {
     MIN_SPACING_FACTOR: 2.2,   // 돌 사이 최소 거리 = STONE_R × 이값 (겹침 금지)
     ATTACK_RANGE_FACTOR: 2.0,  // 자동 공격 사거리 = STONE_R × 이값 (≈ 인접)
     DPS_PER_ATTACKER: 1.5,     // 공격자 1명당 초당 데미지
-    INCOME_PER_TOWER: 0.4,     // 탑 1개당 초당 에너지 생산 (탑 많을수록 지수 성장)
+    // 동심원 등고선 — 안쪽일수록 비용↑·생산↑ (위험·보상·비용 3축)
+    // d = 중심에서 거리 / 아레나 반경
+    RING_INNER_R: 0.18,        // d ≤ 0.18 → inner
+    RING_MIDDLE_R: 0.40,       // d ≤ 0.40 → middle, 그 외 outer
+    RING_OUTER_COST: 15,
+    RING_MIDDLE_COST: 25,
+    RING_INNER_COST: 40,
+    RING_OUTER_INCOME: 0.4,
+    RING_MIDDLE_INCOME: 0.8,
+    RING_INNER_INCOME: 1.5,
+    INCOME_PER_TOWER: 0.4,     // (레거시 — outer 동일)
+    STONE_COST: 15,            // (레거시 — outer 동일)
     PLACE_COOLDOWN: 0.4,       // 돌 두기 행동 쿨다운 (초) — 봇/연속 탭 제한
     MAX_T: 120,                // 전투 시간 상한 (초). 타임아웃 시 다수 승.
 

@@ -32,12 +32,27 @@ export function simulateBattle(atkBet, defBet, opts = {}) {
     return false;
   }
   function inArena(x, y) { return x*x + y*y <= ARENA_R * ARENA_R; }
+  function ringOf(x, y) {
+    const d = Math.hypot(x, y) / ARENA_R;
+    if (d <= M.RING_INNER_R)  return 'inner';
+    if (d <= M.RING_MIDDLE_R) return 'middle';
+    return 'outer';
+  }
+  function ringCost(x, y) {
+    const r = ringOf(x, y);
+    return r === 'inner' ? M.RING_INNER_COST : r === 'middle' ? M.RING_MIDDLE_COST : M.RING_OUTER_COST;
+  }
+  function ringIncome(x, y) {
+    const r = ringOf(x, y);
+    return r === 'inner' ? M.RING_INNER_INCOME : r === 'middle' ? M.RING_MIDDLE_INCOME : M.RING_OUTER_INCOME;
+  }
   function place(side, x, y, free = false) {
     if (!inArena(x, y) || tooClose(x, y)) return false;
+    const cost = ringCost(x, y);
     if (!free) {
-      if (energy[side] < M.STONE_COST) return false;
+      if (energy[side] < cost) return false;
       if (placeCD[side] > 0) return false;
-      energy[side] -= M.STONE_COST;
+      energy[side] -= cost;
       placeCD[side] = M.PLACE_COOLDOWN;
     }
     stones.push({ id: nextId++, side, x, y, hp: M.STONE_HP_MAX });
@@ -97,13 +112,16 @@ export function simulateBattle(atkBet, defBet, opts = {}) {
   const startGrace = 4;
   while (t < MAX_T) {
     t += DT;
-    // 생산
-    let atkN = 0, defN = 0;
-    for (const s of stones) (s.side === 'atk' ? atkN++ : defN++);
-    const incAtk = M.INCOME_PER_TOWER * (hero.atk ? 1 + M.HERO_INCOME_BONUS : 1);
-    const incDef = M.INCOME_PER_TOWER * (hero.def ? 1 + M.HERO_INCOME_BONUS : 1);
-    energy.atk = Math.min(9999, energy.atk + atkN * incAtk * DT);
-    energy.def = Math.min(9999, energy.def + defN * incDef * DT);
+    // 생산 (링별 소득)
+    let rateAtk = 0, rateDef = 0;
+    for (const s of stones) {
+      const r = ringIncome(s.x, s.y);
+      if (s.side === 'atk') rateAtk += r; else rateDef += r;
+    }
+    if (hero.atk) rateAtk *= 1 + M.HERO_INCOME_BONUS;
+    if (hero.def) rateDef *= 1 + M.HERO_INCOME_BONUS;
+    energy.atk = Math.min(9999, energy.atk + rateAtk * DT);
+    energy.def = Math.min(9999, energy.def + rateDef * DT);
     placeCD.atk = Math.max(0, placeCD.atk - DT);
     placeCD.def = Math.max(0, placeCD.def - DT);
 
@@ -140,7 +158,7 @@ export function simulateBattle(atkBet, defBet, opts = {}) {
     // 양쪽 봇 행동
     for (const side of ['atk', 'def']) {
       const strength = side === 'atk' ? playerSkill : aiStrength;
-      if (energy[side] >= M.STONE_COST && placeCD[side] <= 0 && Math.random() < 0.85) {
+      if (energy[side] >= M.RING_OUTER_COST && placeCD[side] <= 0 && Math.random() < 0.85) {
         const pick = pickPlacement(side, strength);
         if (pick) place(side, pick.x, pick.y);
       }
@@ -150,8 +168,8 @@ export function simulateBattle(atkBet, defBet, opts = {}) {
     if (t > startGrace) {
       const an = stones.filter(s => s.side === 'atk').length;
       const dn = stones.filter(s => s.side === 'def').length;
-      if (!an && energy.atk < M.STONE_COST) return { winner: 'defender', t };
-      if (!dn && energy.def < M.STONE_COST) return { winner: 'attacker', t };
+      if (!an && energy.atk < M.RING_OUTER_COST) return { winner: 'defender', t };
+      if (!dn && energy.def < M.RING_OUTER_COST) return { winner: 'attacker', t };
     }
   }
   // 타임아웃 — 다수 승

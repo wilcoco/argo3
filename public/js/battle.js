@@ -97,6 +97,25 @@ export class Battle {
     const dx = x - this.arena.cx, dy = y - this.arena.cy;
     return dx*dx + dy*dy <= this.arena.r * this.arena.r;
   }
+  // 동심원 등고선: 위치 → 'inner'|'middle'|'outer'
+  _ringOf(x, y) {
+    const d = Math.hypot(x - this.arena.cx, y - this.arena.cy) / this.arena.r;
+    if (d <= this.M.RING_INNER_R)  return 'inner';
+    if (d <= this.M.RING_MIDDLE_R) return 'middle';
+    return 'outer';
+  }
+  _ringCost(x, y) {
+    const r = this._ringOf(x, y);
+    if (r === 'inner')  return this.M.RING_INNER_COST;
+    if (r === 'middle') return this.M.RING_MIDDLE_COST;
+    return this.M.RING_OUTER_COST;
+  }
+  _ringIncome(x, y) {
+    const r = this._ringOf(x, y);
+    if (r === 'inner')  return this.M.RING_INNER_INCOME;
+    if (r === 'middle') return this.M.RING_MIDDLE_INCOME;
+    return this.M.RING_OUTER_INCOME;
+  }
   _tooClose(x, y) {
     for (const s of this.stones) {
       if (Math.hypot(s.x - x, s.y - y) < this.MIN_SPACING) return true;
@@ -188,12 +207,17 @@ export class Battle {
       }
       return;   // 선택 없이 적 탭은 무시
     }
-    // 빈 곳 — 돌 두기
+    // 빈 곳 — 돌 두기 (링별 비용)
     if (!this._inArena(x, y)) { this._outsideFlash = performance.now(); return; }
-    if (this.energy[this.mySide] < this.M.STONE_COST) { this._notEnoughFlash = performance.now(); return; }
+    const cost = this._ringCost(x, y);
+    if (this.energy[this.mySide] < cost) {
+      this._notEnoughFlash = performance.now();
+      this._notEnoughCost = cost;
+      return;
+    }
     if (this.placeCD[this.mySide] > 0) return;
     if (this._tooClose(x, y)) { this._tooCloseFlash = performance.now(); return; }
-    this._place(this.mySide, x, y);
+    this._place(this.mySide, x, y, cost);
   }
 
   _stoneAt(x, y) {
@@ -215,8 +239,9 @@ export class Battle {
   }
   _clearSel() { this.selSet.clear(); this.focusTarget = null; }
 
-  _place(side, x, y) {
-    this.energy[side] -= this.M.STONE_COST;
+  _place(side, x, y, cost) {
+    const c = cost != null ? cost : this._ringCost(x, y);
+    this.energy[side] -= c;
     this.placeCD[side] = this.M.PLACE_COOLDOWN;
     const st = this._mkStone(side, x, y);
     this.stones.push(st);
@@ -280,14 +305,16 @@ export class Battle {
     const S = this.M.AI_STRENGTH;
     this.aiTimer = 0.35 + (1 - S) * 0.6 + Math.random() * 0.4;
     const side = this.foeSide;
-    if (this.energy[side] < this.M.STONE_COST) return;
+    // 어떤 링이든 outer는 살 수 있어야 시도 가치 있음
+    if (this.energy[side] < this.M.RING_OUTER_COST) return;
     if (this.placeCD[side] > 0) return;
     const pick = this._aiPickPlacement(side, S);
-    if (pick) this._place(side, pick.x, pick.y);
+    if (pick && this.energy[side] >= pick.cost) this._place(side, pick.x, pick.y, pick.cost);
   }
   _aiPickPlacement(side, strength) {
     const mine = this.stones.filter(s => s.side === side);
     const foe = this.stones.filter(s => s.side !== side);
+    const myEnergy = this.energy[side];
     let best = null, bestScore = -Infinity;
     for (let k = 0; k < 16; k++) {
       let x, y;
@@ -308,7 +335,12 @@ export class Battle {
       }
       if (!this._inArena(x, y)) continue;
       if (this._tooClose(x, y)) continue;
+      const cost = this._ringCost(x, y);
+      if (myEnergy < cost) continue;  // 살 수 없는 링은 후보 제외
       let score = 0;
+      // 링 ROI 매력 — 안쪽일수록 + (단, 비용 부담 큼)
+      const income = this._ringIncome(x, y);
+      score += (income / cost) * 200;   // ROI 점수
       for (const f of foe) {
         const d = Math.hypot(f.x - x, f.y - y);
         if (d <= this.ATTACK_RANGE * 1.5) score += (this.ATTACK_RANGE * 1.5 - d) * 0.5;
@@ -317,22 +349,23 @@ export class Battle {
       for (const m of mine) if (Math.hypot(m.x - x, m.y - y) <= this.ATTACK_RANGE * 2) near++;
       score += Math.min(near, 2) * 8;
       score -= Math.max(0, near - 3) * 4;
-      if (score > bestScore) { bestScore = score; best = { x, y }; }
+      if (score > bestScore) { bestScore = score; best = { x, y, cost }; }
     }
     return best;
   }
 
   // ====== 시뮬레이션 한 틱 ======
   _update(dt) {
-    // 생산 (탑 수에 비례)
-    let atkN = 0, defN = 0;
+    // 생산 (각 돌의 *링별* 소득 합산 + 영웅 보너스)
+    let rateAtk = 0, rateDef = 0;
     for (const s of this.stones) {
-      if (s.side === 'atk') atkN++; else defN++;
+      const r = this._ringIncome(s.x, s.y);
+      if (s.side === 'atk') rateAtk += r; else rateDef += r;
     }
-    const incAtk = this.M.INCOME_PER_TOWER * (this.hero.atk ? 1 + this.M.HERO_INCOME_BONUS : 1);
-    const incDef = this.M.INCOME_PER_TOWER * (this.hero.def ? 1 + this.M.HERO_INCOME_BONUS : 1);
-    this.energy.atk = Math.min(9999, this.energy.atk + atkN * incAtk * dt);
-    this.energy.def = Math.min(9999, this.energy.def + defN * incDef * dt);
+    if (this.hero.atk) rateAtk *= 1 + this.M.HERO_INCOME_BONUS;
+    if (this.hero.def) rateDef *= 1 + this.M.HERO_INCOME_BONUS;
+    this.energy.atk = Math.min(9999, this.energy.atk + rateAtk * dt);
+    this.energy.def = Math.min(9999, this.energy.def + rateDef * dt);
     this.placeCD.atk = Math.max(0, this.placeCD.atk - dt);
     this.placeCD.def = Math.max(0, this.placeCD.def - dt);
 
@@ -451,6 +484,29 @@ export class Battle {
     ctx.lineWidth = flash ? 4 : 2; ctx.setLineDash([6, 6]);
     ctx.strokeStyle = flash ? 'rgba(255,93,115,0.95)' : 'rgba(255,194,77,0.45)';
     ctx.stroke(); ctx.setLineDash([]);
+
+    // 동심원 등고선 — 안쪽 = 고비용·고생산
+    const midR = this.arena.r * this.M.RING_MIDDLE_R;
+    const innR = this.arena.r * this.M.RING_INNER_R;
+    const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 700);
+    // middle 영역 옅게
+    ctx.beginPath(); ctx.arc(this.arena.cx, this.arena.cy, midR, 0, Math.PI*2);
+    ctx.fillStyle = 'rgba(255,160,90,0.05)'; ctx.fill();
+    ctx.lineWidth = 1; ctx.setLineDash([3, 6]);
+    ctx.strokeStyle = 'rgba(255,160,90,0.35)'; ctx.stroke(); ctx.setLineDash([]);
+    // inner 영역 더 강하게
+    ctx.beginPath(); ctx.arc(this.arena.cx, this.arena.cy, innR, 0, Math.PI*2);
+    ctx.fillStyle = `rgba(255,80,80,${0.07 + pulse * 0.05})`; ctx.fill();
+    ctx.lineWidth = 1.5; ctx.setLineDash([4, 4]);
+    ctx.strokeStyle = `rgba(255,120,80,${0.45 + pulse * 0.25})`; ctx.stroke(); ctx.setLineDash([]);
+    // 라벨 — 안쪽·중간 비용 작게
+    ctx.font = 'bold 10px monospace'; ctx.textAlign = 'center';
+    ctx.fillStyle = 'rgba(255,140,100,0.85)';
+    ctx.fillText('⚡' + this.M.RING_INNER_COST, this.arena.cx, this.arena.cy + 3);
+    ctx.fillStyle = 'rgba(255,180,120,0.55)';
+    ctx.fillText('⚡' + this.M.RING_MIDDLE_COST, this.arena.cx, this.arena.cy - innR - 5);
+    ctx.fillStyle = 'rgba(180,180,180,0.45)';
+    ctx.fillText('⚡' + this.M.RING_OUTER_COST, this.arena.cx, this.arena.cy - midR - 5);
 
     // 돌 연결선 (같은 진영, ATTACK_RANGE 안)
     ctx.lineWidth = 1;
