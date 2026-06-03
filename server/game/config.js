@@ -27,6 +27,9 @@ export const CONFIG = {
     BOT_VALUE_MAX: 50,
     BOT_DEF_BET_RATIO: 0.4,    // 봇 셀의 방어 베팅 = 가치 × 이값 (낮게 → 도전 쉽게)
     MAX_ENERGY: 500,           // 에너지 저장 상한 — 쌓아두기만 하면 손해, 사용 압박
+    // per-tower 누적·수확 룰 (v0.3, 구현 대기) — sweep 결과
+    PROD_COEF: 0.0001,         // 타워 생산 = 이값 × size (per second). 0.0001 → cap 8.3시간
+    CAP_FACTOR: 3.0,           // 타워 저장 상한 = 이값 × size
     // 영웅 — 사망(마지막 셀 상실) 시 누적 노력에 비례한 확률로 발동
     HERO_GLORY_PER_WIN: 3,     // 사망 시 글로리 = combat_wins × 이값 + karma × ...
     HERO_GLORY_PER_KARMA: 0.5,
@@ -66,7 +69,7 @@ export const CONFIG = {
     FLIP_HP: 30,               // 변환 시 부활 HP (= 만렙)
     MIN_SPACING_FACTOR: 2.2,   // 돌 사이 최소 거리 = STONE_R × 이값 (겹침 금지)
     ATTACK_RANGE_FACTOR: 2.0,  // 자동 공격 사거리 = STONE_R × 이값 (≈ 인접)
-    DPS_PER_ATTACKER: 1.5,     // 공격자 1명당 초당 데미지
+    DPS_PER_ATTACKER: 2.0,     // 공격자 1명당 초당 데미지 — sweep 결과 (108s 결판, 균형 유지)
     // 동심원 등고선 — 안쪽일수록 비용↑·생산↑ (위험·보상·비용 3축)
     // d = 중심에서 거리 / 아레나 반경
     RING_INNER_R: 0.18,        // d ≤ 0.18 → inner
