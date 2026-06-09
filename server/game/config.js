@@ -19,20 +19,22 @@ export const CONFIG = {
     CLAIM_MAX_VALUE: 90,       // 최대 영역 가치(=점유 비용 최고)
     CLAIM_DEFAULT_VALUE: 25,   // 슬라이더 초기값
     CLAIM_RADIUS_M: 1000,      // 현재 GPS 위치에서 점유 가능한 반경 (m)
+    CHALLENGE_RADIUS_M: 1000,  // 도전도 같은 반경 — 물리적 존재가 게임의 정체성 (점유와 일관)
     CELL_PHYSICAL_BASE_M: 100, // 셀 물리 반경 기본값 (m). 실제 = sqrt(value/40) × base
     ENEMY_CHALLENGE_DIST_M: 50,// 적 셀과 이 거리 이내에 점유 시도 → 자동 도전 흐름으로 전환
-    INCOME_PER_VALUE: 0.15,    // 셀 가치당 시간당 수입 — 0.08 → 0.15로 ~2배 ↑ (체감 속도 개선)
     BOT_TARGET_PER_VIEW: 5,    // 지도 시야 내 최소 적 셀 수 (밑돌면 봇 셀 자동 생성)
     BOT_VALUE_MIN: 20,
     BOT_VALUE_MAX: 50,
     BOT_DEF_BET_RATIO: 0.4,    // 봇 셀의 방어 베팅 = 가치 × 이값 (낮게 → 도전 쉽게)
-    MAX_ENERGY: 500,           // 에너지 저장 상한 — 쌓아두기만 하면 손해, 사용 압박
-    // per-tower 누적·수확 룰 (v0.3, 구현 대기) — sweep 결과
+    BOT_CELLS_MAX: 300,        // 전세계 봇 셀 총량 상한 (지도 팬으로 무한 증식 방지)
+    BOT_CELL_TTL_DAYS: 7,      // 이 기간 지난 봇 셀은 틱에서 정리 (세계 청소)
+    MAX_ENERGY: 2000,          // 에너지 저장 상한 — sweep 결과 (인플레 방지 + 큰 베팅 허용)
+    // per-tower 누적·수확 룰 (v0.3) — sweep 결과
     PROD_COEF: 0.0001,         // 타워 생산 = 이값 × size (per second). 0.0001 → cap 8.3시간
     CAP_FACTOR: 3.0,           // 타워 저장 상한 = 이값 × size
     // 영웅 — 사망(마지막 셀 상실) 시 누적 노력에 비례한 확률로 발동
     HERO_GLORY_PER_WIN: 3,     // 사망 시 글로리 = combat_wins × 이값 + karma × ...
-    HERO_GLORY_PER_KARMA: 0.5,
+    HERO_GLORY_PER_KARMA: 0.05, // karma는 틱마다 자동 누적 — 0.5면 2시간 온라인만으로 영웅 캡 도달. 전투승 중심으로.
     HERO_PROB_DIVISOR: 50,     // 확률 = min(CAP, glory / 이값)
     HERO_PROB_CAP: 0.8,        // 최대 영웅 확률
     HERO_DURATION_TICKS: 80,   // 영웅 지속 (틱)
@@ -90,6 +92,7 @@ export const CONFIG = {
     PROXIMITY_BONUS_PER: 1,    // 보급선 1셀당 시작 돌 +1개
     PROXIMITY_BONUS_MAX: 4,    // 최대 +4개
     HERO_INCOME_BONUS: 0.5,    // 영웅 진영 INCOME +50%
+    TRIBE_ADV_INCOME_BONUS: 0.15, // 종족 상성 우세 진영 생산 +15% (가위바위보를 실제 룰로)
   },
 
   // ---- 베팅 경제 (명세서 6장) ----
@@ -106,11 +109,11 @@ export const CONFIG = {
     VALUE_SCALING: true,       // 고가치 영역일수록 면제 짧게
   },
 
-  // ---- 시간 보호 (명세서 4장) ----
+  // ---- 시간 보호 (명세서 4장) — 수면 보호 ----
+  // 오프라인 전환 후 BASE_HOURS 동안 셀 도전 불가. 접속하면 즉시 해제.
   SHIELD: {
     BASE_HOURS: 8,             // 기본 무적 (수면)
-    PAID_MAX_HOURS: 4,         // 유료 연장 상한
-    EXPOSURE_MIN_HOURS: 12,    // 노출 최소 (불변)
+    OFFLINE_AFTER_MIN: 30,     // 마지막 활동 후 이 시간 지나면 "오프라인"으로 간주 → 보호 시작
   },
 
   // ---- 환생 생태계 (시뮬 검증) ----

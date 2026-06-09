@@ -60,6 +60,8 @@ CREATE INDEX IF NOT EXISTS idx_players_bot ON players(is_bot);
 
 -- 셀에 cooldown(휴식) + 피로 카운터 추가
 ALTER TABLE cells ADD COLUMN IF NOT EXISTS rest_until BIGINT;
+-- 타워별 에너지 저장 (수확 루프) — 생산은 틱에서 누적, 수확으로 지갑 이전
+ALTER TABLE cells ADD COLUMN IF NOT EXISTS stored_energy REAL NOT NULL DEFAULT 0;
 ALTER TABLE cells ADD COLUMN IF NOT EXISTS consec_defenses INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE cells ADD COLUMN IF NOT EXISTS defenses_today INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE cells ADD COLUMN IF NOT EXISTS defenses_day_start TIMESTAMPTZ;

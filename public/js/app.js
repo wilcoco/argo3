@@ -14,6 +14,25 @@ let pending = null;     // 진행 중 도전 {battleId, cellX, cellY}
 
 const $ = (id) => document.getElementById(id);
 
+// 토스트 — alert() 대체 (흐름 안 끊는 알림)
+function toast(msg, type = 'info', ms = 2600) {
+  let box = $('toastBox');
+  if (!box) {
+    box = document.createElement('div');
+    box.id = 'toastBox';
+    document.body.appendChild(box);
+  }
+  const el = document.createElement('div');
+  el.className = `toast ${type}`;
+  el.textContent = msg;
+  box.appendChild(el);
+  requestAnimationFrame(() => el.classList.add('show'));
+  setTimeout(() => {
+    el.classList.remove('show');
+    setTimeout(() => el.remove(), 300);
+  }, ms);
+}
+
 // 두 위경도 좌표 간 미터 거리 (Haversine)
 function haversineM(lat1, lng1, lat2, lng2) {
   const R = 6371000, toRad = (d) => (d * Math.PI) / 180;
@@ -51,6 +70,17 @@ async function login() {
     initGame();
   } catch (e) { $('loginError').textContent = e.message; }
 }
+
+// 자동 로그인 — 저장된 플레이어 id가 살아있으면 닉네임 입력 생략
+(async function autoLogin() {
+  const pid = localStorage.getItem('bw_pid');
+  if (!pid) return;
+  try {
+    CFG = await api('/config');
+    me = await api('/player/' + pid);
+    initGame();
+  } catch { /* 저장된 id 무효 — 로그인 화면 유지 */ }
+})();
 
 let myLoc = null;  // 내 현재 GPS 위치 {lat, lng, acc}
 
@@ -107,6 +137,11 @@ function initGame() {
   $('zoomMe').addEventListener('click', () => {
     if (myLoc) { macro.setView(myLoc.lat, myLoc.lng); refreshCells(); }
   });
+  $('zoomMyCells').addEventListener('click', jumpToMyCell);
+  // 전투 항복 버튼
+  $('forfeitBtn').addEventListener('click', () => {
+    if (battle && battle.running && confirm('항복하면 패배 처리됩니다. 항복할까요?')) battle.forfeit();
+  });
 
   setInterval(refreshCells, 8000);
   setInterval(refreshMe, 5000);   // 서버 틱과 같은 5초 — 즉시 반영
@@ -118,7 +153,7 @@ const tutorial = {
   steps: [
     { id: 'welcome', html: '👋 환영! 지도에서 <b>빈 곳을 탭</b>해 첫 영토를 점유하자.' },
     { id: 'find_enemy', html: '✓ 점유 완료! 이제 <b>지도의 다른 색 셀(적/봇)</b>을 탭해 도전해보자.' },
-    { id: 'battle_hint', html: '⚔ 전투 화면: <b>탭=탑 위치 선정 → 크기 정한 뒤 [건설]</b>. 내 탑 탭→적 탑 탭으로 사격.' },
+    { id: 'battle_hint', html: '⚔ 전투: <b>빈 곳 탭=돌 두기</b> (가운데일수록 비싸지만 생산↑). 내 돌 드래그로 묶고 <b>적 탭=집중공격</b>!' },
     { id: 'done', html: '' },
   ],
   init() {
@@ -151,19 +186,18 @@ const tutorial = {
   },
 };
 
-// 현재 내 셀들의 1틱당 총 수입 — me.cells_value를 서버에서 받거나 macro.cells에서 합산
-function myIncomePerTick() {
-  if (!macro || !macro.cells) return 0;
-  const sum = macro.cells.reduce((s, c) =>
-    s + (c.owner_id === me.id ? Number(c.value || 0) : 0), 0);
-  return sum * (CFG.MACRO.INCOME_PER_VALUE || 0);
+// 내 타워들의 총 생산률 (per hour) — 타워별 저장 룰: PROD_COEF × value /초
+function myProductionPerHour() {
+  const v = Number(me.cells_value) || 0;
+  return v * (CFG.MACRO.PROD_COEF || 0) * 3600;
 }
 
 function updateWallet() {
-  $('energy').textContent = Math.floor(me.energy);
-  const rate = myIncomePerTick();
+  // 지갑 + 상한 표시 — 캡에 닿으면 수확이 막히므로 보이게
+  $('energy').textContent = `${Math.floor(me.energy)}/${CFG.MACRO.MAX_ENERGY}`;
+  const rate = myProductionPerHour();
   const rateEl = $('incomeRate');
-  if (rateEl) rateEl.textContent = rate > 0 ? `+${rate.toFixed(1)}/틱` : '';
+  if (rateEl) rateEl.textContent = rate > 0 ? ` 생산 +${rate.toFixed(0)}/h` : '';
   $('record').textContent = `${me.wins}승 ${me.losses}패`;
   const badge = $('tribeBadge');
   badge.textContent = CFG.TRIBE_NAMES[me.tribe];
@@ -206,11 +240,6 @@ async function refreshMe() {
     }
   } catch {}
 }
-// 더 자주 갱신 — 5초마다 (서버 틱과 일치)
-function startFastRefresh() {
-  setInterval(refreshMe, 5000);
-}
-
 async function refreshCells() {
   if (!macro) return;
   const b = macroBounds();
@@ -222,8 +251,27 @@ async function refreshCells() {
   } catch {}
 }
 function macroBounds() {
-  const v = macro.view, d = 0.02;
-  return { minLat: v.lat - d, minLng: v.lng - d, maxLat: v.lat + d, maxLng: v.lng + d };
+  // 실제 화면 모서리 기준 (줌 무관 고정 delta는 줌아웃 시 가장자리 셀 누락)
+  const a = macro.screen2geo(0, 0);
+  const b = macro.screen2geo(macro.W, macro.H);
+  const pad = 0.002;
+  return {
+    minLat: Math.min(a.lat, b.lat) - pad, maxLat: Math.max(a.lat, b.lat) + pad,
+    minLng: Math.min(a.lng, b.lng) - pad, maxLng: Math.max(a.lng, b.lng) + pad,
+  };
+}
+
+// 내 영토로 점프 — 누를 때마다 내 셀 순환
+let _myCellIdx = 0;
+async function jumpToMyCell() {
+  try {
+    const cells = await api(`/player/${me.id}/cells`);
+    if (!cells.length) { toast('아직 내 영토가 없습니다 — 빈 땅을 탭해 점유하세요'); return; }
+    const c = cells[_myCellIdx % cells.length];
+    _myCellIdx++;
+    macro.setView(Number(c.lat), Number(c.lng));
+    refreshCells();
+  } catch (e) { toast(e.message, 'err'); }
 }
 
 function renderEcoBar(data) {
@@ -305,13 +353,13 @@ function openClaim(lat, lng) {
         const fullCell = (macro.cells || []).find((c) => Number(c.id) === Number(cs.cellId));
         closeSheet();
         if (fullCell) openCell(fullCell);
-        else alert('적 영역과 인접 — 직접 셀을 탭해 도전');
+        else toast('적 영역과 인접 — 직접 셀을 탭해 도전');
         return;
       }
       closeSheet(); await refreshMe(); await refreshCells();
       tutorial.advance('claimed');
     } catch (e) {
-      alert(e.message);
+      toast(e.message, 'err');
       if (/이미 점유|에너지|위치/.test(e.message || '')) { cleanup(); closeSheet(); refreshCells(); }
     }
   };
@@ -320,24 +368,62 @@ function openClaim(lat, lng) {
 // ---- 셀 탭 (내 영역 / 적 영역) ----
 function openCell(c) {
   if (c.owner_id === me.id) {
-    const incomePerTick = Number(c.value) * CFG.MACRO.INCOME_PER_VALUE;
-    const tickSec = CFG.MACRO.SERVER_TICK_MS / 1000;
-    const perMin = incomePerTick * (60 / tickSec);
+    const M = CFG.MACRO;
+    const stored = Number(c.stored_energy) || 0;
+    const cap = Number(c.value) * M.CAP_FACTOR;
+    const perHour = Number(c.value) * M.PROD_COEF * 3600;
+    const full = stored >= cap - 0.01;
+    const pct = Math.min(100, (stored / cap) * 100);
     $('sheetBody').innerHTML = `
       <h3>${c.username || '내 거점'} <span class="tag me">내 영역</span></h3>
       <div class="sub">가치 ${c.value} · 자동방어 베팅 ⚡${c.def_bet}</div>
       <div class="prod-line">
-        <span class="prod-num">+${incomePerTick.toFixed(1)}<span class="dim">/${tickSec}초</span></span>
-        <span class="dim">= 분당 약 ${perMin.toFixed(0)}</span>
+        <span class="prod-num">⚡${stored.toFixed(1)}<span class="dim">/${cap.toFixed(0)} 저장</span></span>
+        <span class="dim">${full ? '⚠ 가득 — 생산 정지!' : `생산 +${perHour.toFixed(1)}/h`}</span>
       </div>
-      <div class="btnrow"><button class="btn ghost" id="cancelBtn">닫기</button></div>`;
+      <div class="storebar"><div class="storebar-fill${full ? ' full' : ''}" style="width:${pct}%"></div></div>
+      ${stored >= 1 ? `
+      <div class="slider-row">
+        <label>수확량</label>
+        <input type="range" id="harvestAmt" min="1" max="${Math.floor(stored)}" value="${Math.floor(stored)}" step="1">
+        <span id="harvestVal">⚡${Math.floor(stored)}</span>
+      </div>` : `<div class="sub dim">아직 수확할 에너지가 없습니다 (방치하면 적이 약탈할 수 있어요)</div>`}
+      <div class="btnrow">
+        <button class="btn ghost" id="cancelBtn">닫기</button>
+        ${stored >= 1 ? `<button class="btn primary" id="harvestBtn">수확</button>` : ''}
+      </div>`;
     openSheet(); $('cancelBtn').onclick = closeSheet;
+    const slider = $('harvestAmt');
+    if (slider) {
+      slider.addEventListener('input', () => { $('harvestVal').textContent = '⚡' + slider.value; });
+      $('harvestBtn').onclick = async () => {
+        try {
+          const r = await api('/harvest', { method: 'POST',
+            body: { playerId: me.id, cellId: c.id, amount: Number(slider.value) } });
+          toast(`⚡${r.harvested.toFixed(0)} 수확! (타워 잔여 ${r.stored.toFixed(0)})`);
+          closeSheet(); await refreshMe(); await refreshCells();   // refreshMe가 +N 부유 텍스트 처리
+        } catch (e) { toast(e.message, 'err'); }
+      };
+    }
     return;
   }
   // 적 영역 → 도전
   const minBet = Math.ceil(c.def_bet * CFG.BETTING.CHALLENGE_MIN_RATIO);
-  const assets = me.energy + 30;
+  const assets = Number(me.energy) + (Number(me.cells_value) || 0);
   const cap = assets >= CFG.BETTING.CAP_THRESHOLD ? Math.floor(me.energy * CFG.BETTING.CAP_RATIO) : Math.floor(me.energy);
+  // GPS 거리 사전 차단 — 도전도 점유처럼 반경 제한
+  let distWarn = '';
+  let tooFar = false;
+  if (myLoc) {
+    const dist = haversineM(myLoc.lat, myLoc.lng, Number(c.lat), Number(c.lng));
+    if (dist > CFG.MACRO.CHALLENGE_RADIUS_M) {
+      tooFar = true;
+      distWarn = `<div class="warn">⚠ ${(dist/1000).toFixed(2)}km — ${(CFG.MACRO.CHALLENGE_RADIUS_M/1000).toFixed(1)}km 이내만 도전 가능. 가까이 가세요!</div>`;
+    }
+  } else {
+    tooFar = true;
+    distWarn = `<div class="warn">⚠ GPS 미허용 — 위치 권한이 있어야 도전할 수 있습니다</div>`;
+  }
   // 큐 길이 미리 조회 (실패해도 무시)
   api(`/queue/status?cellId=${c.id}&playerId=${me.id}`).then((q) => {
     const info = document.getElementById('queueInfo');
@@ -349,9 +435,11 @@ function openCell(c) {
       info.innerHTML = `<span class="warn-inline">⏳ ${parts.join(' · ')} — 도전 시 줄을 섭니다</span>`;
     }
   }).catch(() => {});
+  const loot = Number(c.stored_energy) || 0;
   $('sheetBody').innerHTML = `
     <h3>${c.username || '적 거점'} <span class="tag enemy">적 영역</span></h3>
-    <div class="sub">가치 ${c.value} · 방어 베팅 ⚡${c.def_bet}<br>이기면 점유권+베팅 획득, 지면 베팅 손실</div>
+    <div class="sub">가치 ${c.value} · 방어 베팅 ⚡${c.def_bet}${loot >= 1 ? ` · <b>미수확 ⚡${loot.toFixed(0)} 약탈 가능!</b>` : ''}<br>이기면 점유권+베팅${loot >= 1 ? '+저장 에너지' : ''} 획득, 지면 베팅 손실</div>
+    ${distWarn}
     <div id="queueInfo" class="sub"></div>
     <div class="betrow"><label>내 베팅</label>
       <input type="range" id="betSlider" min="${minBet}" max="${Math.max(minBet,cap)}" value="${minBet}">
@@ -359,7 +447,7 @@ function openCell(c) {
     <div class="sub" id="betInfo"></div>
     <div class="btnrow">
       <button class="btn ghost" id="cancelBtn">취소</button>
-      <button class="btn danger" id="chalBtn" ${me.energy<minBet?'disabled':''}>도전 (실시간 전투)</button>
+      <button class="btn danger" id="chalBtn" ${(tooFar || me.energy<minBet)?'disabled':''}>도전 (실시간 전투)</button>
     </div>`;
   openSheet();
   const bs = $('betSlider');
@@ -373,12 +461,13 @@ function openCell(c) {
 async function startChallenge(c, atkBet) {
   try {
     const result = await api('/challenge', { method: 'POST',
-      body: { playerId: me.id, cellId: c.id, cellX: c.cell_x, cellY: c.cell_y, atkBet } });
+      body: { playerId: me.id, cellId: c.id, cellX: c.cell_x, cellY: c.cell_y, atkBet,
+              playerLat: myLoc?.lat, playerLng: myLoc?.lng } });
 
     // (A) 즉시 전투 시작 (셀이 한가)
     if (result.battle) {
       pending = { battleId: result.battle.id, cell: c, atkBet, defBet: c.def_bet, mySide: 'atk',
-                  proximity: result.proximity, hero: result.hero };
+                  proximity: result.proximity, hero: result.hero, tribeAdv: result.tribeAdv };
       closeSheet();
       tutorial.advance('challenged');
       socket.emit('battle:join', result.battle.id);
@@ -399,11 +488,11 @@ async function startChallenge(c, atkBet) {
       showQueueOverlay(c, result.queued);
       return;
     }
-    alert('알 수 없는 응답');
+    toast('알 수 없는 응답', 'err');
   } catch (e) {
-    alert(e.message);
+    toast(e.message, 'err');
     // 점유 상태가 어긋났을 가능성 — 셀 새로고침으로 화면 동기화
-    if (/점유되지 않은|이미 점유|면제|에너지/.test(e.message || '')) {
+    if (/점유되지 않은|이미 점유|면제|에너지|보호/.test(e.message || '')) {
       closeSheet();
       refreshCells();
     }
@@ -434,7 +523,7 @@ function showQueueOverlay(c, q) {
       pending = null;
       show('macroScreen');
       ov.classList.remove('show');
-    } catch (e) { alert(e.message); }
+    } catch (e) { toast(e.message, 'err'); }
   };
 }
 
@@ -453,7 +542,8 @@ function showWaiting(c) {
 function beginVsAI() {
   const ov = $('overlay'); ov.classList.remove('show'); $('ovBack').style.display = '';
   battle.start(pending.atkBet, pending.defBet, pending.cell.username || '적 거점',
-    { mySide: 'atk', pvp: false, proximity: pending.proximity, hero: pending.hero });
+    { mySide: 'atk', pvp: false, proximity: pending.proximity, hero: pending.hero,
+      tribeAdv: pending.tribeAdv });
 }
 
 // 양쪽: PvP 실시간 대전 시작
@@ -462,7 +552,7 @@ function beginPvP() {
   show('battleScreen');
   battle.start(pending.atkBet, pending.defBet, pending.regionName || pending.cell?.username || '전장',
     { mySide: pending.mySide, pvp: true, socket, battleId: pending.battleId,
-      proximity: pending.proximity, hero: pending.hero });
+      proximity: pending.proximity, hero: pending.hero, tribeAdv: pending.tribeAdv });
 }
 
 // ---- 소켓 이벤트 바인딩 (initGame에서 호출) ----
@@ -472,13 +562,14 @@ function bindBattleSockets() {
     if (!pending || !pending.queued || pending.cellId !== data.cellId) {
       // 다른 세션이거나 이미 취소됨 — 그래도 차례가 왔으니 표시 시도
       pending = { queued: false, battleId: data.battleId, cell: pending?.cell || { username: data.regionName, owner_id: data.defenderId },
-                  atkBet: data.atkBet, defBet: data.defBet, mySide: 'atk', proximity: data.proximity, hero: data.hero };
+                  atkBet: data.atkBet, defBet: data.defBet, mySide: 'atk', proximity: data.proximity, hero: data.hero, tribeAdv: data.tribeAdv };
     } else {
       pending.battleId = data.battleId;
       pending.atkBet = data.atkBet;
       pending.defBet = data.defBet;
       pending.proximity = data.proximity;
       pending.hero = data.hero;
+      pending.tribeAdv = data.tribeAdv;
       pending.queued = false;
       pending.mySide = 'atk';
     }
@@ -525,7 +616,7 @@ function bindBattleSockets() {
   socket.on('challenge:turn_timeout', () => {
     if (!pending) return;
     pending = null;
-    alert('응답 시간 초과 — 베팅을 잃었습니다.');
+    toast('응답 시간 초과 — 베팅을 잃었습니다.', 'err', 4000);
     show('macroScreen'); $('overlay').classList.remove('show'); $('ovBack').style.display = '';
     refreshCells(); refreshMe();
   });
@@ -540,8 +631,12 @@ function bindBattleSockets() {
   socket.on('challenge:fallback_ai', () => { if (pending) beginVsAI(); });
   // 도전자: 너무 늦음(이미 폴백) — 무시하고 AI로
   socket.on('challenge:too_late', () => {});
-  // 양쪽: PvP 시작
-  socket.on('challenge:pvp_start', () => { if (pending) beginPvP(); });
+  // 양쪽: PvP 시작 — 방어자가 베팅을 올렸으면 갱신된 defBet 수신
+  socket.on('challenge:pvp_start', ({ defBet } = {}) => {
+    if (!pending) return;
+    if (Number.isFinite(Number(defBet)) && defBet != null) pending.defBet = Number(defBet);
+    beginPvP();
+  });
 
   // 방어자: 도전 받음
   socket.on('challenge:incoming', (data) => onIncomingChallenge(data));
@@ -558,9 +653,17 @@ function onIncomingChallenge({ battleId, attackerName, regionName, atkBet, defBe
   pending = { battleId, regionName, atkBet, defBet, mySide: 'def' };
   socket.emit('battle:join', battleId);
   const modal = $('challengeModal');
+  const maxDef = Math.max(defBet, Math.floor(Number(me.energy)));
   $('cmText').innerHTML = `<b>${attackerName}</b> 님이<br><b>${regionName}</b>에 도전했습니다!<br>` +
-    `<span class="dim">베팅 ⚡${atkBet} vs 내 방어 ⚡${defBet}</span>`;
+    `<span class="dim">베팅 ⚡${atkBet} vs 내 방어 ⚡${defBet}</span>` +
+    (maxDef > defBet ? `
+    <div class="betrow cm-bet"><label>방어 베팅</label>
+      <input type="range" id="cmBetSlider" min="${defBet}" max="${maxDef}" value="${defBet}">
+      <span class="betval" id="cmBetVal">⚡${defBet}</span></div>
+    <span class="dim">올리면 이길 때 더 강하게 시작 (마이크로 시작 에너지)</span>` : '');
   modal.classList.add('show');
+  const cmSlider = $('cmBetSlider');
+  if (cmSlider) cmSlider.addEventListener('input', () => { $('cmBetVal').textContent = '⚡' + cmSlider.value; });
   // 카운트다운
   let n = (CFG.MICRO.DEFENSE_WAIT_SEC || 15);
   $('cmCount').textContent = n + '초';
@@ -571,7 +674,9 @@ function onIncomingChallenge({ battleId, attackerName, regionName, atkBet, defBe
   }, 1000);
   $('cmAccept').onclick = () => {
     clearInterval(window._cmTimer); modal.classList.remove('show');
-    socket.emit('challenge:accept', { battleId });
+    const newDefBet = cmSlider ? Number(cmSlider.value) : null;
+    if (newDefBet && newDefBet > defBet) pending.defBet = newDefBet;
+    socket.emit('challenge:accept', { battleId, newDefBet });
     // pvp_start 이벤트에서 전투 시작됨
   };
   $('cmDecline').onclick = () => {
@@ -583,16 +688,17 @@ function onIncomingChallenge({ battleId, attackerName, regionName, atkBet, defBe
 // 전투 종료 → 서버 검증 (도전자만 resolve 호출, 방어자는 결과 수신)
 async function onBattleEnd(clientWinner) {
   tutorial.advance('battled');
-  // PvP: 상대에게 내 결과 보고
+  // 내 결과 보고 — 서버가 양쪽 보고를 교차 검증 (PvP), 상대에게도 통지
   if (battle.pvp) {
-    socket.emit('battle:report', { battleId: pending.battleId, winner: clientWinner });
+    socket.emit('battle:report', { battleId: pending.battleId, winner: clientWinner, side: pending.mySide });
   }
   let serverResult = { winner: clientWinner };
-  // 도전자(atk)가 서버 권위 판정을 트리거. 방어자는 같은 battleId 결과를 신뢰.
+  // 도전자(atk)가 서버 판정을 트리거. 방어자는 같은 battleId 결과를 신뢰.
   if (pending.mySide === 'atk') {
     try {
-      const body = { playerSkill: 0.55 };
-      if (battle.pvp) body.pvpWinner = clientWinner;   // PvP면 실제 승자 전달
+      // PvP: 방어자 보고가 서버에 도착할 시간을 잠깐 준다 (교차 검증용)
+      if (battle.pvp) await new Promise((r) => setTimeout(r, 800));
+      const body = { playerSkill: 0.55, clientWinner };
       serverResult = await api(`/challenge/${pending.battleId}/resolve`, { method: 'POST', body });
     } catch (e) { serverResult = { winner: clientWinner }; }
   }

@@ -5,7 +5,7 @@
 import { query, tx } from '../db/pool.js';
 import { CONFIG, tribeBeats, densityMult, maxBet } from './config.js';
 import { latLngToCell, cellToLatLng, cellNeighbors, haversineM } from './geo.js';
-import { simulateBattle } from './battle.js';
+import { simulateBattle, estimateWinProb } from './battle.js';
 
 const MAC = CONFIG.MACRO;
 const ECO = CONFIG.ECOSYSTEM;
@@ -45,8 +45,28 @@ export async function createPlayer(username) {
 }
 
 export async function getPlayer(id) {
-  const r = await query(`SELECT * FROM players WHERE id=$1`, [id]);
+  const r = await query(
+    `SELECT p.*,
+       COALESCE(sub.cells_value, 0) AS cells_value,
+       COALESCE(sub.cells_count, 0) AS cells_count
+     FROM players p
+     LEFT JOIN (SELECT owner_id, SUM(value) cells_value, COUNT(*) cells_count
+                FROM cells GROUP BY owner_id) sub ON sub.owner_id = p.id
+     WHERE p.id=$1`, [id]);
   return r.rows[0] || null;
+}
+
+// 본인 조회 = 활동 신호 — 수면 보호(SHIELD) 판정에 쓰는 last_seen 갱신
+export async function touchPlayer(id) {
+  await query(`UPDATE players SET last_seen=now() WHERE id=$1`, [id]);
+}
+
+// 내 셀 목록 (지도에서 내 영토로 점프용)
+export async function getPlayerCells(playerId) {
+  const r = await query(
+    `SELECT id, lat, lng, value, def_bet, stored_energy FROM cells
+     WHERE owner_id=$1 ORDER BY value DESC`, [playerId]);
+  return r.rows;
 }
 
 // ---- 영토 조회 (지도 영역 내) ----
@@ -92,6 +112,11 @@ async function getOrCreateBot(client) {
 
 async function ensureBotCells(minLat, minLng, maxLat, maxLng, count) {
   return tx(async (client) => {
+    // 전세계 봇 셀 총량 상한 — 지도 팬만으로 무한 증식하지 않게
+    const total = Number((await client.query(
+      `SELECT COUNT(*)::int n FROM cells c JOIN players p ON c.owner_id=p.id WHERE p.is_bot`
+    )).rows[0].n);
+    count = Math.min(count, Math.max(0, MAC.BOT_CELLS_MAX - total));
     for (let i = 0; i < count; i++) {
       const bot = await getOrCreateBot(client);
       // 시야 안쪽 어디에 — 가장자리 살짝 안으로
@@ -193,7 +218,8 @@ export async function claimCell(playerId, lat, lng, value, playerLoc) {
 // ---- 도전(전투) 시작 ----
 // 셀이 한가하면 즉시 전투, 다른 전투 중이거나 휴식 중이면 큐에 등록.
 // target = { cellId } 또는 { cellX, cellY } — 자유 배치 이후엔 cellId 권장.
-export async function startChallenge(attackerId, target, atkBet) {
+// playerLoc = { lat, lng } 도전자 GPS — 점유와 같은 반경 제한 (물리적 존재가 정체성)
+export async function startChallenge(attackerId, target, atkBet, playerLoc) {
   return tx(async (client) => {
     let cell;
     if (target && target.cellId != null) {
@@ -208,6 +234,17 @@ export async function startChallenge(attackerId, target, atkBet) {
     if (!cell || !cell.owner_id) throw new Error('점유되지 않은 영역');
     if (cell.owner_id === attackerId) throw new Error('자기 영역');
 
+    // GPS 도전 반경 — 점유와 동일한 물리 제약
+    if (playerLoc && Number.isFinite(playerLoc.lat) && Number.isFinite(playerLoc.lng)) {
+      const dist = haversineM(playerLoc.lat, playerLoc.lng, Number(cell.lat), Number(cell.lng));
+      if (dist > MAC.CHALLENGE_RADIUS_M) {
+        const km = (MAC.CHALLENGE_RADIUS_M / 1000).toFixed(1);
+        throw new Error(`현재 위치에서 ${km}km 이내의 영역만 도전 가능 (현재 ${(dist/1000).toFixed(2)}km)`);
+      }
+    } else {
+      throw new Error('도전하려면 위치 권한이 필요합니다');
+    }
+
     const tick = await getTick();
     if (cell.exempt_until && tick < cell.exempt_until) throw new Error('방어 면제 기간');
 
@@ -215,10 +252,23 @@ export async function startChallenge(attackerId, target, atkBet) {
     const def = (await client.query(`SELECT * FROM players WHERE id=$1`, [cell.owner_id])).rows[0];
     if (!atk) throw new Error('도전자 없음');
 
-    // 베팅 검증 (명세서 6장)
+    // 수면 보호 — 방어자가 오프라인 전환 후 BASE_HOURS 안이면 도전 불가 (봇 제외)
+    if (def && !def.is_bot && def.last_seen) {
+      const offlineMs = Date.now() - new Date(def.last_seen).getTime();
+      const offlineAfter = CONFIG.SHIELD.OFFLINE_AFTER_MIN * 60 * 1000;
+      const shieldEnd = offlineAfter + CONFIG.SHIELD.BASE_HOURS * 3600 * 1000;
+      if (offlineMs > offlineAfter && offlineMs < shieldEnd) {
+        const remainH = Math.ceil((shieldEnd - offlineMs) / 3600000);
+        throw new Error(`방어자 수면 보호 중 (약 ${remainH}시간 후 해제)`);
+      }
+    }
+
+    // 베팅 검증 (명세서 6장) — 자산 = 에너지 + 보유 셀 가치 합
     const minBet = Math.ceil(cell.def_bet * CONFIG.BETTING.CHALLENGE_MIN_RATIO);
     if (atkBet < minBet) throw new Error(`최소 베팅 ${minBet} 이상 필요`);
-    const atkAssets = atk.energy + 30;
+    const cellsValue = Number((await client.query(
+      `SELECT COALESCE(SUM(value),0) v FROM cells WHERE owner_id=$1`, [attackerId])).rows[0].v);
+    const atkAssets = Number(atk.energy) + cellsValue;
     const cap = maxBet(atk.energy, atkAssets);
     if (atkBet > cap) throw new Error(`베팅 상한 ${cap} 초과`);
     if (atk.energy < atkBet) throw new Error('에너지 부족');
@@ -267,8 +317,17 @@ export async function startChallenge(attackerId, target, atkBet) {
     const R = CONFIG.MICRO.PROXIMITY_RADIUS_M;
     const proximity = await countProximityCells(client, cell.lat, cell.lng, R, attackerId, cell.owner_id);
     const hero = { atk: !!atk.is_hero, def: !!(def && def.is_hero) };
-    return { battle: b, cell, attacker: atk, defender: def, proximity, hero };
+    const tribeAdv = tribeAdvOf(atk, def);
+    return { battle: b, cell, attacker: atk, defender: def, proximity, hero, tribeAdv };
   });
+}
+
+// 종족 상성: 우세 진영 ('atk'|'def'|null) — 마이크로 생산 보너스로 반영
+function tribeAdvOf(atk, def) {
+  if (!atk || !def) return null;
+  if (tribeBeats(atk.tribe, def.tribe)) return 'atk';
+  if (tribeBeats(def.tribe, atk.tribe)) return 'def';
+  return null;
 }
 
 // 큐의 다음 도전자를 꺼내 전투 시작. 호출자가 socket으로 알림 보내야 함.
@@ -310,8 +369,54 @@ export async function popNextChallenger(cellId) {
       const R = CONFIG.MICRO.PROXIMITY_RADIUS_M;
       const proximity = await countProximityCells(client, Number(cell.lat), Number(cell.lng), R, next.challenger_id, cell.owner_id);
       const hero = { atk: !!atk.is_hero, def: !!(def && def.is_hero) };
-      return { battle: b, cell, attacker: atk, defender: def, proximity, hero, challengerId: next.challenger_id };
+      const tribeAdv = tribeAdvOf(atk, def);
+      return { battle: b, cell, attacker: atk, defender: def, proximity, hero, tribeAdv, challengerId: next.challenger_id };
     }
+  });
+}
+
+// ---- 수확 — 타워에 쌓인 에너지를 지갑으로 ----
+// amount 미지정 시 전부. 지갑 상한(MAX_ENERGY) 넘는 만큼은 타워에 남는다 (증발 없음).
+export async function harvestCell(playerId, cellId, amount) {
+  return tx(async (client) => {
+    const cell = (await client.query(`SELECT * FROM cells WHERE id=$1 FOR UPDATE`, [Number(cellId)])).rows[0];
+    if (!cell) throw new Error('셀 없음');
+    if (cell.owner_id !== Number(playerId)) throw new Error('내 영역이 아닙니다');
+    const p = (await client.query(`SELECT * FROM players WHERE id=$1 FOR UPDATE`, [playerId])).rows[0];
+    if (!p) throw new Error('플레이어 없음');
+
+    const stored = Number(cell.stored_energy) || 0;
+    let want = Number.isFinite(Number(amount)) && Number(amount) > 0 ? Number(amount) : stored;
+    want = Math.min(want, stored);
+    const room = Math.max(0, MAC.MAX_ENERGY - Number(p.energy));   // 지갑 여유
+    const harvested = Math.min(want, room);
+    if (harvested <= 0) {
+      if (stored <= 0) throw new Error('수확할 에너지가 없습니다');
+      throw new Error(`지갑이 가득 찼습니다 (상한 ${MAC.MAX_ENERGY})`);
+    }
+    await client.query(`UPDATE cells SET stored_energy = stored_energy - $1::real WHERE id=$2`, [harvested, cellId]);
+    await client.query(`UPDATE players SET energy = energy + $1::real WHERE id=$2`, [harvested, playerId]);
+    return {
+      harvested,
+      stored: stored - harvested,
+      energy: Number(p.energy) + harvested,
+    };
+  });
+}
+
+// ---- 방어 베팅 재설정 — 직접 응전 수락 시 (명세서 2.6) ----
+// 올리는 것만 허용 (낮추면 도전자가 본 기대 보상이 깎이므로).
+export async function raiseDefenseBet(battleId, defenderId, newDefBet) {
+  return tx(async (client) => {
+    const b = (await client.query(`SELECT * FROM battles WHERE id=$1 FOR UPDATE`, [Number(battleId)])).rows[0];
+    if (!b || b.status !== 'active') throw new Error('유효하지 않은 전투');
+    if (Number(b.defender_id) !== Number(defenderId)) throw new Error('방어자만 가능');
+    const def = (await client.query(`SELECT * FROM players WHERE id=$1`, [defenderId])).rows[0];
+    const bet = Math.round(Number(newDefBet));
+    if (!Number.isFinite(bet) || bet < Number(b.def_bet)) return { defBet: Number(b.def_bet) }; // 낮추기 불가 — 무시
+    if (bet > Number(def.energy)) throw new Error('에너지 부족');
+    await client.query(`UPDATE battles SET def_bet=$1 WHERE id=$2`, [bet, battleId]);
+    return { defBet: bet };
   });
 }
 
@@ -390,26 +495,46 @@ export async function resolveChallenge(battleId, opts = {}) {
     if (!b || b.status !== 'active') throw new Error('유효하지 않은 전투');
     const cell = (await client.query(`SELECT * FROM cells WHERE id=$1 FOR UPDATE`, [b.cell_id])).rows[0];
 
-    // 승패 결정: PvP면 클라이언트 보고 승자, 아니면 서버 AI 시뮬 (권위)
+    // 승패 결정 우선순위:
+    // 1) opts.pvpWinner — 서버 내부 경로만 (큐 차례 미응답 등). REST에서는 받지 않는다.
+    // 2) opts.reports — 소켓으로 양쪽 클라가 보고한 결과. 일치 → 채택, 불일치 → 서버 시뮬.
+    // 3) opts.clientWinner — vs AI 전투의 클라 결과. 화면에서 이긴 사람이 지는 일이 없도록
+    //    원칙적으로 신뢰하되, 서버 승률 추정이 0이면 (불가능한 승리 주장) 시뮬로 대체.
+    // 4) 아무것도 없으면 서버 시뮬.
     let result;
+    const rep = opts.reports || {};
     if (opts.pvpWinner === 'attacker' || opts.pvpWinner === 'defender') {
       result = { winner: opts.pvpWinner, t: 0 };
+    } else if (rep.atk || rep.def) {
+      if (rep.atk && rep.def && rep.atk !== rep.def) {
+        result = simulateBattle(Number(b.atk_bet), Number(b.def_bet), opts);  // 보고 충돌 — 서버 판정
+      } else {
+        result = { winner: rep.atk || rep.def, t: 0 };
+      }
+    } else if (opts.clientWinner === 'attacker' || opts.clientWinner === 'defender') {
+      result = { winner: opts.clientWinner, t: 0 };
+      if (opts.clientWinner === 'attacker') {
+        const prob = estimateWinProb(Number(b.atk_bet), Number(b.def_bet), opts, 9);
+        if (prob === 0) result = simulateBattle(Number(b.atk_bet), Number(b.def_bet), opts);
+      }
     } else {
       result = simulateBattle(Number(b.atk_bet), Number(b.def_bet), opts);
     }
     const tick = await getTick();
 
     if (result.winner === 'attacker') {
-      // 도전 성공: 점유 이전 + 베팅 흡수
+      // 도전 성공: 점유 이전 + 베팅 흡수 + *타워에 쌓인 미수확 에너지 약탈*
+      // (수확 안 하고 방치하면 뺏긴다 — 수확 루프의 긴장 장치)
       const atk = (await client.query(`SELECT * FROM players WHERE id=$1`, [b.attacker_id])).rows[0];
+      const loot = Number(cell.stored_energy) || 0;
       await client.query(
-        `UPDATE cells SET owner_id=$1, tribe=$2, def_bet=$3, def_wins=0, exempt_until=NULL WHERE id=$4`,
+        `UPDATE cells SET owner_id=$1, tribe=$2, def_bet=$3, def_wins=0, exempt_until=NULL, stored_energy=0 WHERE id=$4`,
         [b.attacker_id, atk.tribe, Math.min(cell.value, b.atk_bet), cell.id]
       );
       // 승자: combat_wins는 *평생 누적* (사망 시점 글로리 계산용). 연승 리셋 없음.
-      await client.query(`UPDATE players SET energy = LEAST(energy + $1, $4::real),
-        wins = wins + 1, combat_wins = combat_wins + 1, karma = karma + $2 WHERE id=$3`,
-        [b.def_bet, ECO.KARMA_COMBAT_WIN, b.attacker_id, MAC.MAX_ENERGY]);
+      await client.query(`UPDATE players SET energy = LEAST(energy + $1::real, $4::real),
+        wins = wins + 1, combat_wins = combat_wins + 1, karma = karma + $2::real WHERE id=$3`,
+        [Number(b.def_bet) + loot, ECO.KARMA_COMBAT_WIN, b.attacker_id, MAC.MAX_ENERGY]);
       await client.query(`UPDATE players SET energy = GREATEST(0, energy - $1), losses = losses + 1 WHERE id=$2`,
         [b.def_bet, b.defender_id]);
     } else {
@@ -520,16 +645,25 @@ export async function ecosystemTick(io) {
   const tick = (await getTick()) + 1;
   await setTick(tick);
 
-  // 1) 수입 — 셀 가치(value)에 비례, 저장 상한 MAX_ENERGY로 클램프
-  //    큰 영역일수록 많이 생산. 그러나 상한에 도달하면 손해 → 사용 압박.
+  // 1) 생산 — 각 타워가 *자기 위에* 에너지 누적 (수확 루프, GAME_SPEC 2.3)
+  //    생산률 = PROD_COEF × value /초, 저장 상한 = CAP_FACTOR × value.
+  //    가득 차면 생산 정지 → 수확해야 재개. 지갑은 수확으로만 늘어난다.
+  const tickSec = MAC.SERVER_TICK_MS / 1000;
   await query(`
-    UPDATE players p SET energy = LEAST(energy + sub.inc, $2::real)
-    FROM (
-      SELECT owner_id, SUM(value) * $1::real AS inc
-      FROM cells WHERE owner_id IS NOT NULL GROUP BY owner_id
-    ) sub
-    WHERE p.id = sub.owner_id AND p.alive AND NOT p.is_bot
-  `, [MAC.INCOME_PER_VALUE, MAC.MAX_ENERGY]);
+    UPDATE cells c SET stored_energy = LEAST(c.value * $2::real, c.stored_energy + c.value * $1::real)
+    FROM players p
+    WHERE p.id = c.owner_id AND p.alive AND NOT p.is_bot
+      AND c.stored_energy < c.value * $2::real
+  `, [MAC.PROD_COEF * tickSec, MAC.CAP_FACTOR]);
+
+  // 1b) 봇 셀 청소 — TTL 지난 봇 셀 제거 (시간당 1회면 충분)
+  if (tick % 720 === 0) {
+    await query(`
+      DELETE FROM cells c USING players p
+      WHERE c.owner_id = p.id AND p.is_bot
+        AND c.claimed_at < now() - ($1 || ' days')::interval
+    `, [MAC.BOT_CELL_TTL_DAYS]);
+  }
 
   // 2) 카르마 누적 (생존 + 영토) — 봇 제외
   await query(`

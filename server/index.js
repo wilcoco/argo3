@@ -9,9 +9,10 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { router as apiRouter } from './routes/api.js';
-import { ecosystemTick, processQueueTick } from './game/macro.js';
+import { ecosystemTick, processQueueTick, raiseDefenseBet } from './game/macro.js';
 import { CONFIG } from './game/config.js';
 import { initDb } from './db/init.js';
+import { recordReport, sweepReports } from './game/reports.js';
 
 dotenv.config();
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -103,8 +104,8 @@ io.on('connection', (socket) => {
     }
   });
 
-  // 방어자가 수락
-  socket.on('challenge:accept', ({ battleId }) => {
+  // 방어자가 수락 — newDefBet 있으면 방어 베팅 재설정 (올리기만 허용, 명세서 2.6)
+  socket.on('challenge:accept', async ({ battleId, newDefBet }) => {
     const pc = pendingChallenges.get(battleId);
     if (!pc || pc.resolved) {
       // 이미 AI로 폴백됨 — 너무 늦음
@@ -114,11 +115,18 @@ io.on('connection', (socket) => {
     pc.resolved = true;
     clearTimeout(pc.timer);
     pendingChallenges.delete(battleId);
+    let defBet = null;
+    if (newDefBet != null && socket.data.playerId != null) {
+      try {
+        const r = await raiseDefenseBet(battleId, socket.data.playerId, Number(newDefBet));
+        defBet = r.defBet;
+      } catch (e) { /* 재설정 실패 — 기존 베팅 유지 */ }
+    }
     const room = `battle:${battleId}`;
     socket.join(room);
-    // 양쪽에게 PvP 시작 통지
-    io.to(room).emit('challenge:pvp_start', { battleId });
-    io.to(pc.attackerSocket).emit('challenge:pvp_start', { battleId });
+    // 양쪽에게 PvP 시작 통지 (재설정된 방어 베팅 포함)
+    io.to(room).emit('challenge:pvp_start', { battleId, defBet });
+    io.to(pc.attackerSocket).emit('challenge:pvp_start', { battleId, defBet });
   });
 
   // 방어자가 거절
@@ -140,8 +148,9 @@ io.on('connection', (socket) => {
   socket.on('battle:state', ({ battleId, state }) => {
     socket.to(`battle:${battleId}`).emit('battle:state', state);
   });
-  // 전투 종료 보고 (양쪽이 보고 → 서버가 대조). 간이: 먼저 도착한 결과 채택 후 상대에 통지.
-  socket.on('battle:report', ({ battleId, winner }) => {
+  // 전투 종료 보고 — 양쪽 보고를 저장(REST resolve가 교차 검증) + 상대에 통지
+  socket.on('battle:report', ({ battleId, winner, side }) => {
+    recordReport(battleId, side, winner);
     socket.to(`battle:${battleId}`).emit('battle:opponent_done', { winner });
   });
 
@@ -153,7 +162,7 @@ io.on('connection', (socket) => {
 // 큐에서 차례가 된 도전자에게 알림 + 응답 대기 (미응답 시 다음으로 이양)
 const turnPending = new Map();   // battleId → {timer, attackerId}
 function notifyChallengerTurn(popped) {
-  const { battle, cell, defender, proximity, hero, challengerId } = popped;
+  const { battle, cell, defender, proximity, hero, tribeAdv, challengerId } = popped;
   const sid = onlinePlayers.get(Number(challengerId));
   const waitSec = CONFIG.MACRO.CHALLENGER_RESPONSE_SEC;
   if (sid) {
@@ -164,7 +173,7 @@ function notifyChallengerTurn(popped) {
       atkBet: Number(battle.atk_bet), defBet: Number(battle.def_bet),
       regionName: defender?.username || '거점',
       defenderId: cell.owner_id,
-      waitSec, proximity, hero,
+      waitSec, proximity, hero, tribeAdv,
     });
   }
   // 응답 대기 — 미응답 시 전투 자동 종료(방어자 자동승, 도전자 베팅 손실)
@@ -202,6 +211,7 @@ async function startTickLoop() {
       for (const p of popped) {
         notifyChallengerTurn(p);
       }
+      sweepReports();   // 오래된 PvP 보고 정리
     } catch (e) {
       console.error('tick 오류:', e.message);
     }

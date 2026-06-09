@@ -21,6 +21,7 @@ export function simulateBattle(atkBet, defBet, opts = {}) {
   const aiStrength = opts.aiStrength ?? M.AI_STRENGTH;
   const proximity = opts.proximity || { atk: 0, def: 0 };
   const hero = opts.hero || { atk: false, def: false };
+  const tribeAdv = opts.tribeAdv || null;   // 'atk'|'def'|null — 종족 상성 우세 진영 생산 보너스
 
   const stones = [];
   let nextId = 0;
@@ -120,6 +121,8 @@ export function simulateBattle(atkBet, defBet, opts = {}) {
     }
     if (hero.atk) rateAtk *= 1 + M.HERO_INCOME_BONUS;
     if (hero.def) rateDef *= 1 + M.HERO_INCOME_BONUS;
+    if (tribeAdv === 'atk') rateAtk *= 1 + M.TRIBE_ADV_INCOME_BONUS;
+    if (tribeAdv === 'def') rateDef *= 1 + M.TRIBE_ADV_INCOME_BONUS;
     energy.atk = Math.min(9999, energy.atk + rateAtk * DT);
     energy.def = Math.min(9999, energy.def + rateDef * DT);
     placeCD.atk = Math.max(0, placeCD.atk - DT);

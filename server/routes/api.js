@@ -5,10 +5,12 @@ import express from 'express';
 import {
   createPlayer, getPlayer, getCellsInBounds, claimCell,
   startChallenge, resolveChallenge, getTick, cancelQueueEntry, skipRest,
+  harvestCell, touchPlayer, getPlayerCells,
 } from '../game/macro.js';
 import { query } from '../db/pool.js';
 import { estimateWinProb } from '../game/battle.js';
 import { CONFIG } from '../game/config.js';
+import { getReports, clearReports } from '../game/reports.js';
 
 export const router = express.Router();
 
@@ -29,7 +31,16 @@ router.get('/player/:id', async (req, res) => {
   try {
     const p = await getPlayer(Number(req.params.id));
     if (!p) return res.status(404).json({ error: '없음' });
+    // 본인 폴링 = 활동 하트비트 (수면 보호 판정용)
+    touchPlayer(Number(req.params.id)).catch(() => {});
     res.json(p);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// 내 셀 목록 — 지도에서 내 영토로 점프용
+router.get('/player/:id/cells', async (req, res) => {
+  try {
+    res.json(await getPlayerCells(Number(req.params.id)));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -59,20 +70,41 @@ router.post('/claim', async (req, res) => {
 });
 
 // 도전 시작 (전투 레코드 생성) — cellId 우선, 없으면 cellX/cellY 호환
+// playerLat/Lng 필수 — 도전도 점유처럼 GPS 반경 제한
 router.post('/challenge', async (req, res) => {
   try {
-    const { playerId, cellId, cellX, cellY, atkBet } = req.body;
+    const { playerId, cellId, cellX, cellY, atkBet, playerLat, playerLng } = req.body;
     const target = cellId != null ? { cellId } : { cellX, cellY };
-    const result = await startChallenge(Number(playerId), target, Number(atkBet));
+    const playerLoc = (Number.isFinite(+playerLat) && Number.isFinite(+playerLng))
+      ? { lat: +playerLat, lng: +playerLng } : null;
+    const result = await startChallenge(Number(playerId), target, Number(atkBet), playerLoc);
     res.json(result);
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
-// 도전 결과 판정 (서버 권위) — 실시간 전투 종료 후 호출
+// 도전 결과 판정 — 실시간 전투 종료 후 호출.
+// PvP: 소켓으로 모인 양쪽 보고를 교차 검증 (클라 body의 pvpWinner는 받지 않음 — 위조 방지).
+// vs AI: clientWinner를 원칙 신뢰하되 서버 승률 추정으로 sanity check.
 router.post('/challenge/:id/resolve', async (req, res) => {
   try {
-    const { playerSkill, pvpWinner } = req.body || {};
-    const result = await resolveChallenge(Number(req.params.id), { playerSkill, pvpWinner });
+    const { playerSkill, pvpWinner, clientWinner } = req.body || {};
+    const battleId = Number(req.params.id);
+    const reports = getReports(battleId);
+    const result = await resolveChallenge(battleId, {
+      playerSkill,
+      reports,
+      clientWinner: clientWinner || pvpWinner,  // 구버전 클라 호환 (pvpWinner도 sanity check 경로로)
+    });
+    clearReports(battleId);
+    res.json(result);
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+// 수확 — 타워에 쌓인 에너지를 지갑으로
+router.post('/harvest', async (req, res) => {
+  try {
+    const { playerId, cellId, amount } = req.body;
+    const result = await harvestCell(Number(playerId), Number(cellId), amount);
     res.json(result);
   } catch (e) { res.status(400).json({ error: e.message }); }
 });

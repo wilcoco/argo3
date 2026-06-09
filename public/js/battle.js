@@ -51,6 +51,8 @@ export class Battle {
     this._netAccum = 0;
     this.arena = { cx: this.W/2, cy: this.H/2, r: Math.min(this.W, this.H) * M.ARENA_RATIO };
     this.hero = battleOpts.hero || { atk:false, def:false };
+    this.tribeAdv = battleOpts.tribeAdv || null;   // 'atk'|'def'|null — 상성 우세 진영 생산 +15%
+    this._incomingFocus = null;                     // 상대의 집중공격 정보 {id, count}
 
     // 시작 돌 — 양 끝 + 보급선 보너스
     const prox = battleOpts.proximity || { atk:0, def:0 };
@@ -59,15 +61,18 @@ export class Battle {
     this._seedStones('atk', extraAtk);
     this._seedStones('def', extraDef);
 
+    const tribeNote = this.tribeAdv
+      ? (this.tribeAdv === this.mySide ? ' · 🔺상성 우세(+15%)' : ' · 🔻상성 열세')
+      : '';
     document.getElementById('stakeBar').textContent =
-      `베팅 ⚡${atkBet} vs ⚡${defBet} · ${regionName}` + (this.pvp ? ' · ⚔실시간 대전' : '');
+      `베팅 ⚡${atkBet} vs ⚡${defBet} · ${regionName}` + (this.pvp ? ' · ⚔실시간 대전' : '') + tribeNote;
     this._colorOf = (side) => (side === this.mySide ? this.colors.atk : this.colors.def);
     document.querySelector('.side.me .lbl').textContent = this.mySide === 'atk' ? 'YOU' : 'YOU(방어)';
     document.querySelector('.side.en .lbl').textContent = 'ENEMY';
 
-    // 선택/집중 상태
+    // 선택/집중 상태 — focus는 id로 추적 (PvP에서 원격 돌 객체가 200ms마다 재생성되므로 참조 저장 금지)
     this.selSet = new Set();           // 선택된 내 돌 id 모음
-    this.focusTarget = null;            // 집중공격 적 stone
+    this.focusTargetId = null;          // 집중공격 적 stone id
     this._drag = null;                  // {x0,y0,x1,y1,active}
 
     if (this.pvp && this.socket) this._setupNet();
@@ -202,7 +207,7 @@ export class Battle {
       // 적 돌
       if (this.selSet.size > 0) {
         // 집중 공격: 선택된 돌들이 이 적만 공격
-        this.focusTarget = hit;
+        this.focusTargetId = hit.id;
         return;
       }
       return;   // 선택 없이 적 탭은 무시
@@ -237,7 +242,14 @@ export class Battle {
       if (s.x >= xa && s.x <= xb && s.y >= ya && s.y <= yb) this.selSet.add(s.id);
     }
   }
-  _clearSel() { this.selSet.clear(); this.focusTarget = null; }
+  _clearSel() { this.selSet.clear(); this.focusTargetId = null; }
+  _stoneById(id) {
+    if (id == null) return null;
+    for (const s of this.stones) if (s.id === id) return s;
+    return null;
+  }
+  // 항복 — 즉시 패배 처리 (전투에서 빠져나갈 길)
+  forfeit() { if (this.running) this._end(this.foeSide); }
 
   _place(side, x, y, cost) {
     const c = cost != null ? cost : this._ringCost(x, y);
@@ -364,6 +376,8 @@ export class Battle {
     }
     if (this.hero.atk) rateAtk *= 1 + this.M.HERO_INCOME_BONUS;
     if (this.hero.def) rateDef *= 1 + this.M.HERO_INCOME_BONUS;
+    if (this.tribeAdv === 'atk') rateAtk *= 1 + (this.M.TRIBE_ADV_INCOME_BONUS || 0);
+    if (this.tribeAdv === 'def') rateDef *= 1 + (this.M.TRIBE_ADV_INCOME_BONUS || 0);
     this.energy.atk = Math.min(9999, this.energy.atk + rateAtk * dt);
     this.energy.def = Math.min(9999, this.energy.def + rateDef * dt);
     this.placeCD.atk = Math.max(0, this.placeCD.atk - dt);
@@ -373,8 +387,8 @@ export class Battle {
     // + 시각용 포탄을 주기적으로 발사 (각 공격자가 fireCD 만료마다)
     const incoming = new Map();    // stone idx → {atk:N, def:N}
     const focusSet = this.selSet;
-    const focusTgt = this.focusTarget;
-    const focusTgtAlive = focusTgt && this.stones.includes(focusTgt);
+    const focusTgt = this._stoneById(this.focusTargetId);
+    const focusTgtAlive = !!focusTgt && focusTgt.side !== this.mySide;
     const range = this.ATTACK_RANGE + this.STONE_R * 2;
     for (let i = 0; i < this.stones.length; i++) {
       const a = this.stones[i];
@@ -407,10 +421,24 @@ export class Battle {
       }
     }
 
+    // 상대의 집중공격 — PvP에서 내 돌 HP는 내가 권위. 상대가 보낸 focus 정보로 실데미지 적용.
+    if (this.pvp && this._incomingFocus) {
+      const f = this._incomingFocus;
+      const idx = this.stones.findIndex(s => s.side === this.mySide && s.id === f.id);
+      if (idx >= 0) {
+        this.stones[idx].hp -= this.M.DPS_PER_ATTACKER * f.count * dt;
+        if (!incoming.has(idx)) incoming.set(idx, { atk:0, def:0 });
+        incoming.get(idx)[this.foeSide] += f.count;
+      }
+    }
+
     // 사망/변환 처리
+    // PvP: 원격 돌의 생사·변환은 소유자 클라가 결정 (state 동기화로 반영됨) — 여기선 스킵.
+    //      내 돌이 상대 다수에게 죽으면 flip_gain을 보내 소유권을 넘긴다 (돌 복제 방지).
     for (let i = this.stones.length - 1; i >= 0; i--) {
       const s = this.stones[i];
       if (s.hp > 0) continue;
+      if (this.pvp && s.remote) continue;
       const inc = incoming.get(i);
       if (!inc) { this.stones.splice(i, 1); continue; }
       // 다수 공격자 진영으로 변환 (동수면 그냥 죽음)
@@ -418,17 +446,28 @@ export class Battle {
       const winnerSide = inc.atk > inc.def ? 'atk' : 'def';
       if (winnerSide === s.side) {
         this.stones.splice(i, 1);
+      } else if (this.pvp && s.side === this.mySide) {
+        // 내 돌이 상대 진영으로 변환 — 로컬 제거 + 상대에게 통지 (상대가 자기 돌로 추가)
+        this.socket.emit('battle:action', {
+          battleId: this.battleId, action: { type: 'flip_gain', x: s.x, y: s.y },
+        });
+        this.selSet.delete(s.id);
+        this.stones.splice(i, 1);
+        this._spawnFx(s.x, s.y, this.foeSide);
       } else {
         s.side = winnerSide;
         s.hp = this.M.FLIP_HP;
         s.flippedAt = performance.now();
         // 선택/집중에서도 정리
         this.selSet.delete(s.id);
-        if (this.focusTarget === s) this.focusTarget = null;
+        if (this.focusTargetId === s.id) this.focusTargetId = null;
       }
     }
-    // 집중 타겟이 죽어 사라졌으면 클리어
-    if (this.focusTarget && !this.stones.includes(this.focusTarget)) this.focusTarget = null;
+    // 집중 타겟이 죽어 사라졌거나 내 편으로 변환됐으면 클리어
+    {
+      const ft = this._stoneById(this.focusTargetId);
+      if (!ft || ft.side === this.mySide) this.focusTargetId = null;
+    }
 
     // 이펙트
     if (this._fx) {
@@ -442,7 +481,7 @@ export class Battle {
 
     this._ai(dt);
 
-    // PvP 권위 동기화 — 내 돌들 상태를 주기적으로 상대에게
+    // PvP 권위 동기화 — 내 돌들 상태 + 내 집중공격 정보를 주기적으로 상대에게
     if (this.pvp && this.socket) {
       this._netAccum += dt;
       if (this._netAccum >= 0.2) {
@@ -450,7 +489,14 @@ export class Battle {
         const mine = this.stones.filter(s => s.side === this.mySide).map(s => ({
           id:s.id, x:s.x, y:s.y, hp:s.hp,
         }));
-        this.socket.emit('battle:state', { battleId:this.battleId, state:{ stones: mine, energy: this.energy[this.mySide] } });
+        // 집중공격 중이면 상대에게 알림 — 상대 클라가 자기 돌에 실데미지 적용 (원격 돌 HP는 소유자 권위)
+        let focus = null;
+        const ft = this._stoneById(this.focusTargetId);
+        if (ft && ft.remote && this.selSet.size > 0) {
+          focus = { id: Number(String(ft.id).slice(1)), count: this.selSet.size };
+        }
+        this.socket.emit('battle:state', { battleId:this.battleId,
+          state:{ stones: mine, energy: this.energy[this.mySide], focus } });
       }
     }
 
@@ -499,14 +545,14 @@ export class Battle {
     ctx.fillStyle = `rgba(255,80,80,${0.07 + pulse * 0.05})`; ctx.fill();
     ctx.lineWidth = 1.5; ctx.setLineDash([4, 4]);
     ctx.strokeStyle = `rgba(255,120,80,${0.45 + pulse * 0.25})`; ctx.stroke(); ctx.setLineDash([]);
-    // 라벨 — 안쪽·중간 비용 작게
+    // 라벨 — 비용 + 생산량 함께 (안쪽이 왜 좋은지 보이게)
     ctx.font = 'bold 10px monospace'; ctx.textAlign = 'center';
     ctx.fillStyle = 'rgba(255,140,100,0.85)';
-    ctx.fillText('⚡' + this.M.RING_INNER_COST, this.arena.cx, this.arena.cy + 3);
+    ctx.fillText(`⚡${this.M.RING_INNER_COST} ▲${this.M.RING_INNER_INCOME}/s`, this.arena.cx, this.arena.cy + 3);
     ctx.fillStyle = 'rgba(255,180,120,0.55)';
-    ctx.fillText('⚡' + this.M.RING_MIDDLE_COST, this.arena.cx, this.arena.cy - innR - 5);
+    ctx.fillText(`⚡${this.M.RING_MIDDLE_COST} ▲${this.M.RING_MIDDLE_INCOME}/s`, this.arena.cx, this.arena.cy - innR - 5);
     ctx.fillStyle = 'rgba(180,180,180,0.45)';
-    ctx.fillText('⚡' + this.M.RING_OUTER_COST, this.arena.cx, this.arena.cy - midR - 5);
+    ctx.fillText(`⚡${this.M.RING_OUTER_COST} ▲${this.M.RING_OUTER_INCOME}/s`, this.arena.cx, this.arena.cy - midR - 5);
 
     // 돌 연결선 (같은 진영, ATTACK_RANGE 안)
     ctx.lineWidth = 1;
@@ -551,12 +597,23 @@ export class Battle {
     }
 
     // 집중 타겟 표시
-    if (this.focusTarget) {
-      const t = this.focusTarget;
+    const focusStone = this._stoneById(this.focusTargetId);
+    if (focusStone) {
+      const t = focusStone;
       const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 180);
       ctx.beginPath(); ctx.arc(t.x, t.y, this.STONE_R + 8 + pulse * 4, 0, Math.PI*2);
       ctx.strokeStyle = `rgba(255,80,80,${0.6 + pulse * 0.4})`;
       ctx.lineWidth = 3; ctx.setLineDash([4, 4]); ctx.stroke(); ctx.setLineDash([]);
+    }
+    // 내가 집중공격 받는 중 — 경고 표시
+    if (this.pvp && this._incomingFocus) {
+      const victim = this.stones.find(s => s.side === this.mySide && s.id === this._incomingFocus.id);
+      if (victim) {
+        const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 120);
+        ctx.beginPath(); ctx.arc(victim.x, victim.y, this.STONE_R + 7 + pulse * 3, 0, Math.PI*2);
+        ctx.strokeStyle = `rgba(255,200,60,${0.5 + pulse * 0.5})`;
+        ctx.lineWidth = 2.5; ctx.setLineDash([2, 4]); ctx.stroke(); ctx.setLineDash([]);
+      }
     }
 
     // 드래그 라쏘
@@ -616,7 +673,7 @@ export class Battle {
       ctx.fillStyle = 'rgba(255,255,255,0.85)';
       ctx.font = 'bold 12px monospace';
       ctx.textAlign = 'left';
-      const hint = this.focusTarget
+      const hint = focusStone
         ? `▶ ${this.selSet.size}개 집중공격 중`
         : `● ${this.selSet.size}개 선택됨 — 적을 탭해 집중공격`;
       ctx.fillText(hint, 12, this.H - 12);
@@ -651,13 +708,21 @@ export class Battle {
       if (a.type === 'place') {
         // 상대(foe) 진영의 새 돌
         this.stones.push({ id: 'r' + a.id, side: this.foeSide, x: a.x, y: a.y, hp: this.M.STONE_HP_MAX, remote:true });
+      } else if (a.type === 'flip_gain') {
+        // 상대 돌이 내 진영으로 변환됨 (오델로) — 내 돌로 부활, 이후 내 state 보고에 포함
+        const st = this._mkStone(this.mySide, a.x, a.y);
+        st.hp = this.M.FLIP_HP;
+        st.flippedAt = performance.now();
+        this.stones.push(st);
       }
     });
     this.socket.on('battle:state', (s) => {
       const mine = this.stones.filter(t => t.side === this.mySide);
-      const remote = (s.stones || []).map(t => ({ ...t, side: this.foeSide, remote: true }));
+      // 원격 id는 'r' 접두로 통일 — 내 로컬 id와 충돌 방지 (focus id 추적의 전제)
+      const remote = (s.stones || []).map(t => ({ ...t, id: 'r' + t.id, side: this.foeSide, remote: true }));
       this.stones = mine.concat(remote);
       if (typeof s.energy === 'number') this.energy[this.foeSide] = s.energy;
+      this._incomingFocus = s.focus || null;   // {id: 내 돌 id, count} — 상대의 집중공격
     });
   }
 

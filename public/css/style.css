@@ -143,3 +143,22 @@ input[type=range]{flex:1;accent-color:var(--pl);height:4px;}
 @keyframes cmPulse{0%,100%{transform:scale(1)}50%{transform:scale(1.15)}}
 .cm-text{font-size:14px;line-height:1.7;margin-bottom:8px;}
 .cm-count{font-size:20px;font-weight:700;color:var(--en);margin-bottom:18px;}
+
+/* 토스트 (alert 대체) */
+#toastBox{position:fixed;top:60px;left:50%;transform:translateX(-50%);z-index:90;
+  display:flex;flex-direction:column;gap:8px;align-items:center;pointer-events:none;width:90%;max-width:380px;}
+.toast{background:var(--panel);border:1px solid var(--pl);border-radius:10px;padding:10px 16px;
+  font-size:13px;color:var(--fg);opacity:0;transform:translateY(-8px);transition:all .25s ease;
+  box-shadow:0 4px 18px rgba(0,0,0,.5);text-align:center;}
+.toast.show{opacity:1;transform:translateY(0);}
+.toast.err{border-color:var(--en);color:var(--en);}
+
+/* 타워 저장 게이지 (수확 UI) */
+.storebar{height:8px;background:rgba(255,255,255,.08);border-radius:4px;overflow:hidden;margin:8px 0 12px;}
+.storebar-fill{height:100%;background:var(--gold);border-radius:4px;transition:width .3s;}
+.storebar-fill.full{background:var(--en);animation:storePulse 1s infinite;}
+@keyframes storePulse{0%,100%{opacity:1}50%{opacity:.55}}
+
+/* 방어 베팅 재설정 (도전 모달 내) */
+.cm-bet{margin-top:10px;}
+.danger-text{color:var(--en);}

@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>BACTERIA WAR</title>
-<link rel="stylesheet" href="/css/style.css?v=23">
+<link rel="stylesheet" href="/css/style.css?v=24">
 </head>
 <body>
 <div id="app">
@@ -41,6 +41,7 @@
       <button id="zoomIn" class="zoom-btn">＋</button>
       <button id="zoomOut" class="zoom-btn">−</button>
       <button id="zoomMe" class="zoom-btn" title="내 위치로">◎</button>
+      <button id="zoomMyCells" class="zoom-btn" title="내 영토로 (반복 탭: 순환)">🏰</button>
     </div>
     <div class="eco-bar" id="ecoBar"></div>
 
@@ -58,10 +59,11 @@
     </div>
     <div class="bctrl">
       <div class="modehint" id="modeHint">
-        빈 곳 탭: 돌 두기 (⚡15) · 내 돌 탭/드래그: 선택 → 적 탭: 집중공격
+        빈 곳 탭: 돌 두기 (바깥⚡15·중간⚡25·안쪽⚡40, 안쪽일수록 생산↑) · 내 돌 드래그: 선택 → 적 탭: 집중공격
       </div>
       <div class="placebtns">
         <button class="btn ghost" id="clearSel">선택 해제</button>
+        <button class="btn ghost danger-text" id="forfeitBtn">항복</button>
       </div>
     </div>
     <div class="countdown" id="countdown"></div>
@@ -86,6 +88,6 @@
 </div>
 
 <script src="/socket.io/socket.io.js"></script>
-<script type="module" src="/js/app.js?v=23"></script>
+<script type="module" src="/js/app.js?v=24"></script>
 </body>
 </html>
