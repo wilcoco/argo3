@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>BACTERIA WAR</title>
-<link rel="stylesheet" href="/css/style.css?v=24">
+<link rel="stylesheet" href="/css/style.css?v=25">
 </head>
 <body>
 <div id="app">
@@ -26,13 +26,15 @@
       <div class="wallet">
         <span class="tribe-badge" id="tribeBadge">―</span>
         <span>⚡<b id="energy">0</b><span class="dim income-rate" id="incomeRate"></span></span>
+        <span class="harvest-chip hidden" id="harvestChip">🧺<b>0</b></span>
         <span class="glory-chip" id="gloryChip" title="현재 인생 누적 노력. 사망 시 영웅 확률.">🏆<b id="glory">0</b><span class="dim" id="heroProb">(0%)</span></span>
         <span class="hero-chip hidden" id="heroChip">👑영웅</span>
         <span class="dim" id="record">0승 0패</span>
       </div>
     </div>
     <canvas id="mapCanvas"></canvas>
-    <div class="maphint">탭: <b>빈 땅 점유</b> · 적 영역 탭: <b>도전</b> · 핀치/휠 줌</div>
+    <div class="maphint">탭: <b>빈 땅 점유</b> · 적 영역 탭: <b>도전</b> · 금색 링: <b>약탈 가능</b></div>
+    <div class="activity-ticker" id="activityTicker"></div>
     <div class="tut-banner hidden" id="tutBanner">
       <span class="tut-text" id="tutText"></span>
       <button class="tut-close" id="tutClose" title="닫기">✕</button>
@@ -42,6 +44,7 @@
       <button id="zoomOut" class="zoom-btn">−</button>
       <button id="zoomMe" class="zoom-btn" title="내 위치로">◎</button>
       <button id="zoomMyCells" class="zoom-btn" title="내 영토로 (반복 탭: 순환)">🏰</button>
+      <button id="lbBtn" class="zoom-btn" title="영토 순위">🏆</button>
     </div>
     <div class="eco-bar" id="ecoBar"></div>
 
@@ -55,6 +58,7 @@
     <div class="stakebar" id="stakeBar"></div>
     <div class="bhud">
       <div class="side me"><div class="lbl">YOU</div><div class="val" id="meE">0</div></div>
+      <div class="side mid"><div class="btimer" id="bTimer">2:00</div><div class="bcount even" id="bCount">● 1 vs 1</div></div>
       <div class="side en"><div class="lbl">ENEMY</div><div class="val" id="enE">0</div></div>
     </div>
     <div class="bctrl">
@@ -88,6 +92,6 @@
 </div>
 
 <script src="/socket.io/socket.io.js"></script>
-<script type="module" src="/js/app.js?v=24"></script>
+<script type="module" src="/js/app.js?v=25"></script>
 </body>
 </html>

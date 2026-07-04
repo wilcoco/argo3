@@ -48,12 +48,53 @@ export async function getPlayer(id) {
   const r = await query(
     `SELECT p.*,
        COALESCE(sub.cells_value, 0) AS cells_value,
-       COALESCE(sub.cells_count, 0) AS cells_count
+       COALESCE(sub.cells_count, 0) AS cells_count,
+       COALESCE(sub.stored_total, 0) AS stored_total
      FROM players p
-     LEFT JOIN (SELECT owner_id, SUM(value) cells_value, COUNT(*) cells_count
+     LEFT JOIN (SELECT owner_id, SUM(value) cells_value, COUNT(*) cells_count,
+                       SUM(stored_energy) stored_total
                 FROM cells GROUP BY owner_id) sub ON sub.owner_id = p.id
      WHERE p.id=$1`, [id]);
   return r.rows[0] || null;
+}
+
+// ---- 순위표 — 영토 가치 기준 상위 N (봇 제외) ----
+export async function getLeaderboard(limit = 10) {
+  const r = await query(
+    `SELECT p.id, p.username, p.tribe, p.is_hero, p.wins, p.losses,
+       COALESCE(SUM(c.value), 0)::real AS territory,
+       COUNT(c.id)::int AS cells
+     FROM players p
+     LEFT JOIN cells c ON c.owner_id = p.id
+     WHERE p.alive AND NOT p.is_bot
+     GROUP BY p.id
+     HAVING COUNT(c.id) > 0
+     ORDER BY territory DESC, p.wins DESC
+     LIMIT $1`, [limit]);
+  return r.rows;
+}
+
+// ---- 한번에 수확 — 내 모든 타워의 저장 에너지를 지갑으로 (상한까지) ----
+export async function harvestAll(playerId) {
+  return tx(async (client) => {
+    const p = (await client.query(`SELECT * FROM players WHERE id=$1 FOR UPDATE`, [playerId])).rows[0];
+    if (!p) throw new Error('플레이어 없음');
+    const cells = (await client.query(
+      `SELECT id, stored_energy FROM cells WHERE owner_id=$1 AND stored_energy >= 1
+       ORDER BY stored_energy DESC FOR UPDATE`, [playerId])).rows;
+    if (!cells.length) throw new Error('수확할 에너지가 없습니다');
+    let room = Math.max(0, MAC.MAX_ENERGY - Number(p.energy));
+    if (room <= 0) throw new Error(`지갑이 가득 찼습니다 (상한 ${MAC.MAX_ENERGY})`);
+    let harvested = 0;
+    for (const c of cells) {
+      if (room <= 0) break;
+      const take = Math.min(Number(c.stored_energy), room);
+      await client.query(`UPDATE cells SET stored_energy = stored_energy - $1::real WHERE id=$2`, [take, c.id]);
+      harvested += take; room -= take;
+    }
+    await client.query(`UPDATE players SET energy = energy + $1::real WHERE id=$2`, [harvested, playerId]);
+    return { harvested, towers: cells.length, energy: Number(p.energy) + harvested };
+  });
 }
 
 // 본인 조회 = 활동 신호 — 수면 보호(SHIELD) 판정에 쓰는 last_seen 갱신
@@ -126,11 +167,13 @@ async function ensureBotCells(minLat, minLng, maxLat, maxLng, count) {
       const lng = minLng + padLng + Math.random() * (maxLng - minLng - padLng*2);
       const value = MAC.BOT_VALUE_MIN + Math.floor(Math.random() * (MAC.BOT_VALUE_MAX - MAC.BOT_VALUE_MIN));
       const defBet = Math.max(5, Math.round(value * MAC.BOT_DEF_BET_RATIO));
+      // 봇 셀엔 약탈 에너지를 실어 둔다 — 신규 유저가 첫 5분에 "이기면 뜯는다"를 체험
+      const loot = MAC.BOT_LOOT_MIN + Math.floor(Math.random() * (MAC.BOT_LOOT_MAX - MAC.BOT_LOOT_MIN));
       const { cellX, cellY } = latLngToCell(lat, lng);
       await client.query(
-        `INSERT INTO cells (cell_x, cell_y, owner_id, tribe, value, def_bet, lat, lng)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-        [cellX, cellY, bot.id, bot.tribe, value, defBet, lat, lng]
+        `INSERT INTO cells (cell_x, cell_y, owner_id, tribe, value, def_bet, lat, lng, stored_energy)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+        [cellX, cellY, bot.id, bot.tribe, value, defBet, lat, lng, loot]
       );
     }
   });
@@ -522,11 +565,13 @@ export async function resolveChallenge(battleId, opts = {}) {
     }
     const tick = await getTick();
 
+    let reward = null;   // 승자 보상 상세 (결과 화면용)
     if (result.winner === 'attacker') {
       // 도전 성공: 점유 이전 + 베팅 흡수 + *타워에 쌓인 미수확 에너지 약탈*
       // (수확 안 하고 방치하면 뺏긴다 — 수확 루프의 긴장 장치)
       const atk = (await client.query(`SELECT * FROM players WHERE id=$1`, [b.attacker_id])).rows[0];
       const loot = Number(cell.stored_energy) || 0;
+      reward = { defBet: Number(b.def_bet), loot, cellValue: Number(cell.value) };
       await client.query(
         `UPDATE cells SET owner_id=$1, tribe=$2, def_bet=$3, def_wins=0, exempt_until=NULL, stored_energy=0 WHERE id=$4`,
         [b.attacker_id, atk.tribe, Math.min(cell.value, b.atk_bet), cell.id]
@@ -538,9 +583,12 @@ export async function resolveChallenge(battleId, opts = {}) {
       await client.query(`UPDATE players SET energy = GREATEST(0, energy - $1), losses = losses + 1 WHERE id=$2`,
         [b.def_bet, b.defender_id]);
     } else {
-      // 방어 성공: 도전자 베팅 손실, 방어자 누적승 + 면제 판정
+      // 방어 성공: 도전자 베팅을 *방어자가 획득* (증발 아님 — 방어에도 보상이 있어야 지킬 맛이 난다)
+      reward = { atkBet: Number(b.atk_bet) };
       await client.query(`UPDATE players SET energy = GREATEST(0, energy - $1), losses = losses + 1 WHERE id=$2`,
         [b.atk_bet, b.attacker_id]);
+      await client.query(`UPDATE players SET energy = LEAST(energy + $1::real, $2::real) WHERE id=$3`,
+        [Number(b.atk_bet), MAC.MAX_ENERGY, b.defender_id]);
       const newWins = cell.def_wins + 1;
       let exemptUntil = null;
       if (newWins >= CONFIG.EXEMPT.WINS) {
@@ -633,7 +681,14 @@ export async function resolveChallenge(battleId, opts = {}) {
       [restUntil, consec, daily, dayStart, cell.id]);
 
     const restSec = restTicks * (MAC.SERVER_TICK_MS / 1000);
-    return { winner: result.winner, battleTime: result.t, restUntil, restSec, restReason, consec, daily, death: deathInfo };
+    // 활동 피드용 이름 (전투 참가자)
+    const names = (await client.query(
+      `SELECT a.username AS attacker, d.username AS defender
+       FROM battles bb LEFT JOIN players a ON a.id=bb.attacker_id
+                       LEFT JOIN players d ON d.id=bb.defender_id
+       WHERE bb.id=$1`, [battleId])).rows[0] || {};
+    return { winner: result.winner, battleTime: result.t, restUntil, restSec, restReason,
+             consec, daily, death: deathInfo, reward, names, cellValue: Number(cell.value) };
   });
 }
 

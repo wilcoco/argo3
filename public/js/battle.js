@@ -500,20 +500,31 @@ export class Battle {
       }
     }
 
-    // HUD
+    // HUD — 에너지 + *승리 조건 가시화* (남은 시간, 돌 수, 우세)
+    const myN = this.stones.filter(s => s.side === this.mySide).length;
+    const foeN = this.stones.filter(s => s.side === this.foeSide).length;
     document.getElementById('meE').textContent = Math.floor(this.energy[this.mySide]);
     document.getElementById('enE').textContent = Math.floor(this.energy[this.foeSide]);
+    const elapsed = (performance.now() - this.startT) / 1000;
+    const remain = Math.max(0, this.M.MAX_T - elapsed);
+    const timerEl = document.getElementById('bTimer');
+    const countEl = document.getElementById('bCount');
+    if (timerEl) {
+      const m = Math.floor(remain / 60), s = Math.floor(remain % 60);
+      timerEl.textContent = `${m}:${String(s).padStart(2, '0')}`;
+      timerEl.classList.toggle('urgent', remain <= 15);
+    }
+    if (countEl) {
+      countEl.textContent = `● ${myN} vs ${foeN}`;
+      countEl.className = 'bcount ' + (myN > foeN ? 'lead' : myN < foeN ? 'behind' : 'even');
+    }
 
     // 승패
     if (performance.now() - this.startT > 4000) {
-      const myN = this.stones.filter(s => s.side === this.mySide).length;
-      const foeN = this.stones.filter(s => s.side === this.foeSide).length;
       if (!myN && this.energy[this.mySide] < this.M.STONE_COST) return this._end(this.foeSide);
       if (!foeN && this.energy[this.foeSide] < this.M.STONE_COST) return this._end(this.mySide);
     }
-    if (performance.now() - this.startT > this.M.MAX_T * 1000) {
-      const myN = this.stones.filter(s => s.side === this.mySide).length;
-      const foeN = this.stones.filter(s => s.side === this.foeSide).length;
+    if (remain <= 0) {
       return this._end(myN >= foeN ? this.mySide : this.foeSide);
     }
   }

@@ -31,6 +31,7 @@ app.get('/healthz', (req, res) => res.json({ ok: true }));
 
 const server = http.createServer(app);
 const io = new IOServer(server, { cors: { origin: '*' } });
+app.set('io', io);   // REST 라우트에서 활동 피드 브로드캐스트용
 
 // 온라인 플레이어 추적: playerId -> socketId
 const onlinePlayers = new Map();

@@ -17,6 +17,8 @@ export class MacroMap {
     this.tribeColors = opts.tribeColors || ['#3ad1c8', '#ff5d73', '#ffc24d'];
     this.myId = opts.myId;
     this.claimRadiusM = opts.claimRadiusM || 1000;
+    this.capFactor = opts.capFactor || 3;        // 타워 저장 상한 배율 (게이지용)
+    this.lootShowMin = opts.lootShowMin || 10;   // 이 이상 저장된 적 셀 = 지도에 약탈 표시
     this.myLoc = null;          // {lat, lng, acc}
     this.minZoom = opts.minZoom || 11;   // 더 멀리 — 약 30km 시야
     this.maxZoom = opts.maxZoom || 18;   // 더 가깝게 — 골목 단위
@@ -251,6 +253,8 @@ export class MacroMap {
       const mine = c.owner_id === this.myId;
       const color = c.tribe != null ? this.tribeColors[c.tribe] : '#3a4859';
       const radius = this._cellRadiusPx(c);
+      const stored = Number(c.stored_energy) || 0;
+      const cap = Number(c.value || 40) * this.capFactor;
       ctx.beginPath(); ctx.arc(p.x, p.y, radius, 0, Math.PI*2);
       ctx.fillStyle = this._alpha(color, 0.16); ctx.fill();
       ctx.lineWidth = mine ? 3 : 1.6;
@@ -258,6 +262,26 @@ export class MacroMap {
       if (c.is_hero) { // 영웅 빛
         ctx.beginPath(); ctx.arc(p.x, p.y, radius+4, 0, Math.PI*2);
         ctx.strokeStyle = 'rgba(255,255,255,0.6)'; ctx.lineWidth = 2; ctx.stroke();
+      }
+      if (mine && stored >= 1 && radius >= 10) {
+        // 내 타워 — 저장 게이지 호 (12시 방향부터 채움). 가득 = 빨강 펄스 "수확해!"
+        const frac = Math.min(1, stored / cap);
+        const full = frac >= 0.999;
+        const t = (Date.now() % 1000) / 1000;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, radius + 4, -Math.PI/2, -Math.PI/2 + Math.PI*2*frac);
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = full ? `rgba(255,93,115,${0.55 + 0.45*Math.abs(Math.sin(t*Math.PI))})` : 'rgba(255,224,110,0.85)';
+        ctx.stroke();
+      } else if (!mine && stored >= this.lootShowMin && radius >= 8) {
+        // 적 타워에 약탈감 표시 — 금색 펄스 링 + 양. 지도가 사냥터가 된다.
+        const t = (Date.now() % 1400) / 1400;
+        ctx.beginPath(); ctx.arc(p.x, p.y, radius + 5 + t * 5, 0, Math.PI*2);
+        ctx.strokeStyle = `rgba(255,208,80,${0.7 * (1 - t)})`;
+        ctx.lineWidth = 2; ctx.stroke();
+        ctx.fillStyle = 'rgba(255,224,110,0.95)';
+        ctx.font = 'bold 10px JetBrains Mono,monospace'; ctx.textAlign = 'center';
+        ctx.fillText(`⚡${Math.floor(stored)}`, p.x, p.y + radius + 13);
       }
       ctx.fillStyle = color; ctx.font = 'bold 10px JetBrains Mono,monospace'; ctx.textAlign = 'center';
       ctx.fillText(c.username || '거점', p.x, p.y - radius - 5);

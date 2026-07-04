@@ -94,6 +94,8 @@ function initGame() {
     tribeColors: CFG.TRIBE_COLORS,
     myId: me.id,
     claimRadiusM: CFG.MACRO.CLAIM_RADIUS_M,
+    capFactor: CFG.MACRO.CAP_FACTOR,
+    lootShowMin: CFG.MACRO.LOOT_SHOW_MIN,
     onTapEmpty: openClaim,
     onTapCell: openCell,
   });
@@ -125,6 +127,7 @@ function initGame() {
   socket.emit('player:online', me.id);          // 온라인 등록 (도전 알림 수신용)
   socket.on('connect', () => socket.emit('player:online', me.id));
   socket.on('ecosystem:update', renderEcoBar);
+  socket.on('activity', showActivity);            // 실시간 세계 활동 피드
   bindBattleSockets();                            // 도전/PvP 이벤트 바인딩
 
   // 전투 인스턴스
@@ -138,6 +141,8 @@ function initGame() {
     if (myLoc) { macro.setView(myLoc.lat, myLoc.lng); refreshCells(); }
   });
   $('zoomMyCells').addEventListener('click', jumpToMyCell);
+  $('lbBtn').addEventListener('click', openLeaderboard);
+  $('harvestChip').addEventListener('click', harvestAllMine);
   // 전투 항복 버튼
   $('forfeitBtn').addEventListener('click', () => {
     if (battle && battle.running && confirm('항복하면 패배 처리됩니다. 항복할까요?')) battle.forfeit();
@@ -152,7 +157,7 @@ function initGame() {
 const tutorial = {
   steps: [
     { id: 'welcome', html: '👋 환영! 지도에서 <b>빈 곳을 탭</b>해 첫 영토를 점유하자.' },
-    { id: 'find_enemy', html: '✓ 점유 완료! 이제 <b>지도의 다른 색 셀(적/봇)</b>을 탭해 도전해보자.' },
+    { id: 'find_enemy', html: '✓ 점유 완료! <b>금색으로 빛나는 적 셀</b>은 미수확 에너지 — 이기면 통째로 약탈! 탭해서 도전.' },
     { id: 'battle_hint', html: '⚔ 전투: <b>빈 곳 탭=돌 두기</b> (가운데일수록 비싸지만 생산↑). 내 돌 드래그로 묶고 <b>적 탭=집중공격</b>!' },
     { id: 'done', html: '' },
   ],
@@ -198,6 +203,16 @@ function updateWallet() {
   const rate = myProductionPerHour();
   const rateEl = $('incomeRate');
   if (rateEl) rateEl.textContent = rate > 0 ? ` 생산 +${rate.toFixed(0)}/h` : '';
+  // 수확 가능 총량 칩 — 쌓여 있으면 한번에 수확 유도
+  const chip = $('harvestChip');
+  if (chip) {
+    const stored = Number(me.stored_total) || 0;
+    if (stored >= 1) {
+      chip.classList.remove('hidden');
+      chip.innerHTML = `🧺<b>${Math.floor(stored)}</b>`;
+      chip.title = '탭: 모든 타워에서 한번에 수확';
+    } else chip.classList.add('hidden');
+  }
   $('record').textContent = `${me.wins}승 ${me.losses}패`;
   const badge = $('tribeBadge');
   badge.textContent = CFG.TRIBE_NAMES[me.tribe];
@@ -259,6 +274,47 @@ function macroBounds() {
     minLat: Math.min(a.lat, b.lat) - pad, maxLat: Math.max(a.lat, b.lat) + pad,
     minLng: Math.min(a.lng, b.lng) - pad, maxLng: Math.max(a.lng, b.lng) + pad,
   };
+}
+
+// ---- 활동 피드 티커 — 세계가 살아있다는 감각 ----
+function showActivity({ text }) {
+  const el = $('activityTicker');
+  if (!el) return;
+  el.textContent = text;
+  el.classList.add('show');
+  clearTimeout(window._actTimer);
+  window._actTimer = setTimeout(() => el.classList.remove('show'), 6000);
+}
+
+// ---- 순위표 ----
+async function openLeaderboard() {
+  try {
+    const rows = await api('/leaderboard');
+    const list = rows.map((r, i) => {
+      const color = CFG.TRIBE_COLORS[r.tribe] || '#888';
+      const isMe = r.id === me.id;
+      return `<div class="lb-row${isMe ? ' me' : ''}">
+        <span class="lb-rank">${['🥇','🥈','🥉'][i] || (i+1)}</span>
+        <span class="lb-name" style="color:${color}">${r.is_hero ? '👑' : ''}${r.username}</span>
+        <span class="lb-stat">영토 ${Math.round(r.territory)} · ${r.cells}칸 · ${r.wins}승</span>
+      </div>`;
+    }).join('');
+    $('sheetBody').innerHTML = `
+      <h3>🏆 영토 순위</h3>
+      <div class="lb-list">${list || '<div class="dim">아직 순위가 없습니다</div>'}</div>
+      <div class="btnrow"><button class="btn ghost" id="cancelBtn">닫기</button></div>`;
+    openSheet();
+    $('cancelBtn').onclick = closeSheet;
+  } catch (e) { toast(e.message, 'err'); }
+}
+
+// ---- 한번에 수확 ----
+async function harvestAllMine() {
+  try {
+    const r = await api('/harvestall', { method: 'POST', body: { playerId: me.id } });
+    toast(`🧺 타워 ${r.towers}개에서 ⚡${r.harvested.toFixed(0)} 수확!`);
+    await refreshMe(); await refreshCells();
+  } catch (e) { toast(e.message, 'err'); }
 }
 
 // 내 영토로 점프 — 누를 때마다 내 셀 순환
@@ -722,10 +778,23 @@ async function onBattleEnd(clientWinner) {
       ? `<br><span class="dim">상대 영토 전멸 → 영웅 환생 (${(death.prob*100).toFixed(0)}% 성공)</span>`
       : `<br><span class="dim">상대 영토 전멸 → 평범하게 사망</span>`;
   }
+  // 보상 상세 — 무엇을 얼마나 얻었는지 명확하게 (쾌감은 명세에서 나온다)
+  const rw = serverResult.reward;
   if (pending.mySide === 'atk') {
-    $('ovDesc').innerHTML = (iWon ? `${pending.cell?.username || '거점'} 점유권 획득!` : `도전 실패. 베팅을 잃었다.`) + deathNote;
+    if (iWon) {
+      let gains = `🏰 거점 점유 (가치 ${rw?.cellValue ?? pending.cell?.value ?? '?'})`;
+      if (rw) {
+        gains += `<br>⚡ 베팅 획득 +${Math.round(rw.defBet)}`;
+        if (rw.loot >= 1) gains += `<br>💰 저장 에너지 약탈 <b>+${Math.round(rw.loot)}</b>`;
+      }
+      $('ovDesc').innerHTML = `${pending.cell?.username || '거점'} 정복!<br><span class="reward-list">${gains}</span>` + deathNote;
+    } else {
+      $('ovDesc').innerHTML = `도전 실패. 베팅 ⚡${pending.atkBet}을 잃었다.` + deathNote;
+    }
   } else {
-    $('ovDesc').innerHTML = (iWon ? `방어 성공! 영역을 지켰다.` : `방어 실패. 영역을 빼앗겼다.`) + deathNote;
+    $('ovDesc').innerHTML = (iWon
+      ? `방어 성공! 영역을 지키고 상대 베팅 ⚡${pending.atkBet}을 가져왔다.`
+      : `방어 실패. 영역을 빼앗겼다.`) + deathNote;
   }
   ov.classList.add('show');
   await refreshMe();

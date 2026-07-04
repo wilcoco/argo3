@@ -28,6 +28,9 @@ export const CONFIG = {
     BOT_DEF_BET_RATIO: 0.4,    // 봇 셀의 방어 베팅 = 가치 × 이값 (낮게 → 도전 쉽게)
     BOT_CELLS_MAX: 300,        // 전세계 봇 셀 총량 상한 (지도 팬으로 무한 증식 방지)
     BOT_CELL_TTL_DAYS: 7,      // 이 기간 지난 봇 셀은 틱에서 정리 (세계 청소)
+    BOT_LOOT_MIN: 15,          // 봇 셀 생성 시 실린 약탈 에너지 (첫 5분 보상 루프)
+    BOT_LOOT_MAX: 60,
+    LOOT_SHOW_MIN: 10,         // 지도에 약탈 표시할 최소 저장량 (금색 펄스)
     MAX_ENERGY: 2000,          // 에너지 저장 상한 — sweep 결과 (인플레 방지 + 큰 베팅 허용)
     // per-tower 누적·수확 룰 (v0.3) — sweep 결과
     PROD_COEF: 0.0001,         // 타워 생산 = 이값 × size (per second). 0.0001 → cap 8.3시간

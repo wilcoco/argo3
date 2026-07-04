@@ -5,7 +5,7 @@ import express from 'express';
 import {
   createPlayer, getPlayer, getCellsInBounds, claimCell,
   startChallenge, resolveChallenge, getTick, cancelQueueEntry, skipRest,
-  harvestCell, touchPlayer, getPlayerCells,
+  harvestCell, harvestAll, touchPlayer, getPlayerCells, getLeaderboard,
 } from '../game/macro.js';
 import { query } from '../db/pool.js';
 import { estimateWinProb } from '../game/battle.js';
@@ -96,7 +96,42 @@ router.post('/challenge/:id/resolve', async (req, res) => {
       clientWinner: clientWinner || pvpWinner,  // 구버전 클라 호환 (pvpWinner도 sanity check 경로로)
     });
     clearReports(battleId);
+    // 활동 피드 — 살아있는 세계 감각 (전투 결과를 전체에 브로드캐스트)
+    const io = req.app.get('io');
+    if (io && result.names) {
+      const { attacker, defender } = result.names;
+      let text;
+      if (result.winner === 'attacker') {
+        const lootTxt = result.reward?.loot >= 1 ? ` (+⚡${Math.round(result.reward.loot)} 약탈)` : '';
+        text = `⚔ ${attacker}님이 ${defender}님의 거점(가치 ${result.cellValue})을 점령!${lootTxt}`;
+      } else {
+        text = `🛡 ${defender}님이 ${attacker}님의 도전을 격퇴!`;
+      }
+      io.emit('activity', { text, t: Date.now() });
+      if (result.death) {
+        io.emit('activity', {
+          text: result.death.heroRolled
+            ? `👑 ${defender}님이 모든 영토를 잃었지만 영웅으로 환생!`
+            : `💀 ${defender}님의 영토가 전멸했습니다`,
+          t: Date.now(),
+        });
+      }
+    }
     res.json(result);
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+// 순위표 — 영토 가치 상위
+router.get('/leaderboard', async (req, res) => {
+  try { res.json(await getLeaderboard(10)); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// 한번에 수확
+router.post('/harvestall', async (req, res) => {
+  try {
+    const { playerId } = req.body;
+    res.json(await harvestAll(Number(playerId)));
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
