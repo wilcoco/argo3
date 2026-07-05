@@ -107,3 +107,13 @@ CREATE TABLE IF NOT EXISTS game_state (
   key           TEXT PRIMARY KEY,
   value         JSONB NOT NULL
 );
+
+-- 데일리 퀘스트 진행 (KST 기준 일일 리셋 — 날짜 행 분리)
+CREATE TABLE IF NOT EXISTS player_quests (
+  player_id     INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+  day           DATE NOT NULL,
+  quest_key     TEXT NOT NULL,
+  progress      REAL NOT NULL DEFAULT 0,
+  claimed       BOOLEAN NOT NULL DEFAULT FALSE,
+  PRIMARY KEY (player_id, day, quest_key)
+);

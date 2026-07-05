@@ -96,6 +96,7 @@ function initGame() {
     claimRadiusM: CFG.MACRO.CLAIM_RADIUS_M,
     capFactor: CFG.MACRO.CAP_FACTOR,
     lootShowMin: CFG.MACRO.LOOT_SHOW_MIN,
+    proximityM: CFG.MICRO.PROXIMITY_RADIUS_M,
     onTapEmpty: openClaim,
     onTapCell: openCell,
   });
@@ -142,6 +143,8 @@ function initGame() {
   });
   $('zoomMyCells').addEventListener('click', jumpToMyCell);
   $('lbBtn').addEventListener('click', openLeaderboard);
+  $('questBtn').addEventListener('click', openQuests);
+  refreshQuests();
   $('harvestChip').addEventListener('click', harvestAllMine);
   // 전투 항복 버튼
   $('forfeitBtn').addEventListener('click', () => {
@@ -286,6 +289,52 @@ function showActivity({ text }) {
   window._actTimer = setTimeout(() => el.classList.remove('show'), 6000);
 }
 
+// ---- 데일리 퀘스트 ----
+let _questsCache = [];
+async function refreshQuests() {
+  try {
+    _questsCache = await api(`/quests/${me.id}`);
+    const claimable = _questsCache.some((q) => q.done && !q.claimed);
+    const dot = $('questDot');
+    if (dot) dot.classList.toggle('hidden', !claimable);
+  } catch {}
+}
+async function openQuests() {
+  await refreshQuests();
+  const rows = _questsCache.map((q) => {
+    const pct = Math.min(100, (q.progress / q.target) * 100);
+    const state = q.claimed
+      ? `<span class="q-done">✓ 수령 완료</span>`
+      : q.done
+        ? `<button class="btn primary q-claim" data-key="${q.key}">⚡${q.reward} 받기</button>`
+        : `<span class="dim">${Math.floor(q.progress)}/${q.target}</span>`;
+    return `<div class="quest-row${q.done && !q.claimed ? ' ready' : ''}">
+      <span class="q-icon">${q.icon}</span>
+      <div class="q-body">
+        <div class="q-label">${q.label} <span class="dim">보상 ⚡${q.reward}</span></div>
+        <div class="q-bar"><div class="q-fill" style="width:${pct}%"></div></div>
+      </div>
+      <div class="q-state">${state}</div>
+    </div>`;
+  }).join('');
+  $('sheetBody').innerHTML = `
+    <h3>📜 오늘의 퀘스트 <span class="dim" style="font-size:11px">자정(KST) 리셋</span></h3>
+    <div class="quest-list">${rows}</div>
+    <div class="btnrow"><button class="btn ghost" id="cancelBtn">닫기</button></div>`;
+  openSheet();
+  $('cancelBtn').onclick = closeSheet;
+  document.querySelectorAll('.q-claim').forEach((btn) => {
+    btn.onclick = async () => {
+      try {
+        const r = await api('/quests/claim', { method: 'POST', body: { playerId: me.id, key: btn.dataset.key } });
+        toast(`📜 퀘스트 보상 ⚡${r.reward} 획득!`);
+        await refreshMe();
+        openQuests();   // 목록 갱신
+      } catch (e) { toast(e.message, 'err'); }
+    };
+  });
+}
+
 // ---- 순위표 ----
 async function openLeaderboard() {
   try {
@@ -314,7 +363,19 @@ async function harvestAllMine() {
     const r = await api('/harvestall', { method: 'POST', body: { playerId: me.id } });
     toast(`🧺 타워 ${r.towers}개에서 ⚡${r.harvested.toFixed(0)} 수확!`);
     await refreshMe(); await refreshCells();
+    refreshQuests();
   } catch (e) { toast(e.message, 'err'); }
+}
+
+// 특정 지점 반경 내 소유자별 셀 수 (보급선 예측 — 화면에 로드된 셀 기준 근사)
+function countNearby(lat, lng, ownerId, excludeCellId = null) {
+  const R = CFG.MICRO.PROXIMITY_RADIUS_M;
+  return (macro.cells || []).filter((c) =>
+    c.owner_id === ownerId &&
+    Number(c.id) !== Number(excludeCellId) &&
+    c.lat != null &&
+    haversineM(lat, lng, Number(c.lat), Number(c.lng)) <= R
+  ).length;
 }
 
 // 내 영토로 점프 — 누를 때마다 내 셀 순환
@@ -365,11 +426,17 @@ function openClaim(lat, lng) {
     warn = `<div class="warn">⚠ GPS 미허용 — 위치 권한이 있어야 점유할 수 있습니다</div>`;
   }
   const blocked = !!warn;
+  // 보급망 예측 — 이 위치에 지으면 몇 개와 연결되나
+  const linkN = countNearby(lat, lng, me.id);
+  const linkLine = linkN > 0
+    ? `<div class="supply-line good">🔗 보급망 연결 ${linkN}개 — 이 근처 전투 시 시작 돌 +${Math.min(linkN + 1, CFG.MICRO.PROXIMITY_BONUS_MAX)}</div>`
+    : `<div class="supply-line dim-line">🔗 주변에 내 셀 없음 — 뭉쳐 지으면 전투 시작 돌이 늘어난다</div>`;
   $('sheetBody').innerHTML = `
     <h3>빈 땅 점유 <span class="tag free">미점유</span></h3>
     <div class="sub">크게 점유할수록 더 많은 에너지가 들고, 영역 가치·생산력이 높아진다.<br>
       <span class="dim">자기 셀끼리는 겹쳐 클러스터를 만들 수 있다. 적 셀에 너무 가까우면 자동으로 도전이 시도된다.</span>
     </div>
+    ${linkLine}
     ${warn}
     <div class="slider-row">
       <label>영역 가치 / 비용</label>
@@ -492,9 +559,17 @@ function openCell(c) {
     }
   }).catch(() => {});
   const loot = Number(c.stored_energy) || 0;
+  // 보급선 예측 — 전투 시작 돌 수 (클러스터 시너지의 실전 의미)
+  const maxProx = CFG.MICRO.PROXIMITY_BONUS_MAX;
+  const myProx = Math.min(countNearby(Number(c.lat), Number(c.lng), me.id), maxProx);
+  const defProx = Math.min(countNearby(Number(c.lat), Number(c.lng), c.owner_id, c.id), maxProx);
+  const proxCls = myProx > defProx ? 'good' : myProx < defProx ? 'bad' : '';
+  const proxLine = `<div class="supply-line ${proxCls}">🔗 보급선 — 시작 돌 <b>나 ${1+myProx}</b> vs <b>상대 ${1+defProx}</b>
+    <span class="dim">(800m 내 아군 셀당 +1, 최대 +${maxProx})</span></div>`;
   $('sheetBody').innerHTML = `
     <h3>${c.username || '적 거점'} <span class="tag enemy">적 영역</span></h3>
     <div class="sub">가치 ${c.value} · 방어 베팅 ⚡${c.def_bet}${loot >= 1 ? ` · <b>미수확 ⚡${loot.toFixed(0)} 약탈 가능!</b>` : ''}<br>이기면 점유권+베팅${loot >= 1 ? '+저장 에너지' : ''} 획득, 지면 베팅 손실</div>
+    ${proxLine}
     ${distWarn}
     <div id="queueInfo" class="sub"></div>
     <div class="betrow"><label>내 베팅</label>
@@ -608,7 +683,8 @@ function beginPvP() {
   show('battleScreen');
   battle.start(pending.atkBet, pending.defBet, pending.regionName || pending.cell?.username || '전장',
     { mySide: pending.mySide, pvp: true, socket, battleId: pending.battleId,
-      proximity: pending.proximity, hero: pending.hero, tribeAdv: pending.tribeAdv });
+      proximity: pending.proximity, hero: pending.hero, tribeAdv: pending.tribeAdv,
+      serverAuth: pending.serverAuth });
 }
 
 // ---- 소켓 이벤트 바인딩 (initGame에서 호출) ----
@@ -687,11 +763,21 @@ function bindBattleSockets() {
   socket.on('challenge:fallback_ai', () => { if (pending) beginVsAI(); });
   // 도전자: 너무 늦음(이미 폴백) — 무시하고 AI로
   socket.on('challenge:too_late', () => {});
-  // 양쪽: PvP 시작 — 방어자가 베팅을 올렸으면 갱신된 defBet 수신
-  socket.on('challenge:pvp_start', ({ defBet } = {}) => {
+  // 양쪽: PvP 시작 — 서버 권위 아레나 (베팅·상성·영웅 컨텍스트는 서버가 재계산해 내려줌)
+  socket.on('challenge:pvp_start', (payload = {}) => {
     if (!pending) return;
-    if (Number.isFinite(Number(defBet)) && defBet != null) pending.defBet = Number(defBet);
+    if (payload.defBet != null && Number.isFinite(Number(payload.defBet))) pending.defBet = Number(payload.defBet);
+    if (payload.atkBet != null && Number.isFinite(Number(payload.atkBet))) pending.atkBet = Number(payload.atkBet);
+    if (payload.hero) pending.hero = payload.hero;
+    if (payload.tribeAdv !== undefined) pending.tribeAdv = payload.tribeAdv;
+    pending.serverAuth = !!payload.serverAuth;
     beginPvP();
+  });
+  // 서버 권위 PvP 종료 — 서버가 판정·정산까지 끝낸 결과 수신
+  socket.on('pvp:end', ({ battleId, winner, result }) => {
+    if (!pending || Number(pending.battleId) !== Number(battleId)) return;
+    pending.serverResult = result || { winner };
+    if (battle && battle.running && battle.serverAuth) battle.endFromServer(winner);
   });
 
   // 방어자: 도전 받음
@@ -744,19 +830,23 @@ function onIncomingChallenge({ battleId, attackerName, regionName, atkBet, defBe
 // 전투 종료 → 서버 검증 (도전자만 resolve 호출, 방어자는 결과 수신)
 async function onBattleEnd(clientWinner) {
   tutorial.advance('battled');
-  // 내 결과 보고 — 서버가 양쪽 보고를 교차 검증 (PvP), 상대에게도 통지
-  if (battle.pvp) {
-    socket.emit('battle:report', { battleId: pending.battleId, winner: clientWinner, side: pending.mySide });
-  }
   let serverResult = { winner: clientWinner };
-  // 도전자(atk)가 서버 판정을 트리거. 방어자는 같은 battleId 결과를 신뢰.
-  if (pending.mySide === 'atk') {
-    try {
-      // PvP: 방어자 보고가 서버에 도착할 시간을 잠깐 준다 (교차 검증용)
-      if (battle.pvp) await new Promise((r) => setTimeout(r, 800));
-      const body = { playerSkill: 0.55, clientWinner };
-      serverResult = await api(`/challenge/${pending.battleId}/resolve`, { method: 'POST', body });
-    } catch (e) { serverResult = { winner: clientWinner }; }
+  if (battle.serverAuth) {
+    // 서버 권위 PvP — 서버가 이미 판정·정산 완료 (pvp:end로 수신)
+    serverResult = pending.serverResult || serverResult;
+  } else {
+    // 레거시 경로 (vs AI) — 결과 보고 + REST 정산
+    if (battle.pvp) {
+      socket.emit('battle:report', { battleId: pending.battleId, winner: clientWinner, side: pending.mySide });
+    }
+    // 도전자(atk)가 서버 판정을 트리거. 방어자는 같은 battleId 결과를 신뢰.
+    if (pending.mySide === 'atk') {
+      try {
+        if (battle.pvp) await new Promise((r) => setTimeout(r, 800));
+        const body = { playerSkill: 0.55, clientWinner };
+        serverResult = await api(`/challenge/${pending.battleId}/resolve`, { method: 'POST', body });
+      } catch (e) { serverResult = { winner: clientWinner }; }
+    }
   }
   const iWon = (pending.mySide === 'atk' && serverResult.winner === 'attacker') ||
                (pending.mySide === 'def' && serverResult.winner === 'defender');
@@ -798,6 +888,7 @@ async function onBattleEnd(clientWinner) {
   }
   ov.classList.add('show');
   await refreshMe();
+  refreshQuests();
 }
 
 // ---- 시트 ----

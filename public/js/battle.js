@@ -8,6 +8,8 @@
 //  · 승: 한쪽 전멸 OR 타임아웃 시 다수
 // ============================================================
 
+import { SFX, isMuted, toggleMute, primeAudio } from './sound.js';
+
 export class Battle {
   constructor(canvas, cfg, opts = {}) {
     this.canvas = canvas;
@@ -26,6 +28,14 @@ export class Battle {
     // 선택 해제 버튼
     const clr = document.getElementById('clearSel');
     if (clr) clr.addEventListener('click', () => this._clearSel());
+    // 음소거 토글
+    const mute = document.getElementById('muteBtn');
+    if (mute) {
+      mute.textContent = isMuted() ? '🔇' : '🔊';
+      mute.addEventListener('click', () => { mute.textContent = toggleMute() ? '🔇' : '🔊'; });
+    }
+    // 첫 터치에서 오디오 컨텍스트 준비 (자동재생 정책)
+    canvas.addEventListener('pointerdown', () => primeAudio(), { once: true });
   }
 
   // ====== 시작 ======
@@ -53,13 +63,27 @@ export class Battle {
     this.hero = battleOpts.hero || { atk:false, def:false };
     this.tribeAdv = battleOpts.tribeAdv || null;   // 'atk'|'def'|null — 상성 우세 진영 생산 +15%
     this._incomingFocus = null;                     // 상대의 집중공격 정보 {id, count}
+    // 서버 권위 모드 (PvP) — 클라는 입력 전송 + 스냅샷 렌더만
+    this.serverAuth = !!battleOpts.serverAuth;
+    if (this.serverAuth) {
+      // 서버 좌표계(반경 230) → 화면 스케일. 돌은 안 움직이므로 보간 불필요.
+      this.SRV_R = 230;
+      this.scale = this.arena.r / this.SRV_R;
+      this.STONE_R = M.STONE_R * this.scale;
+      this.MIN_SPACING = this.STONE_R * M.MIN_SPACING_FACTOR;
+      this.ATTACK_RANGE = this.STONE_R * M.ATTACK_RANGE_FACTOR;
+      this._gotSnap = false;
+      this._srvRemain = M.MAX_T;
+    }
 
-    // 시작 돌 — 양 끝 + 보급선 보너스
-    const prox = battleOpts.proximity || { atk:0, def:0 };
-    const extraAtk = Math.min(prox.atk, M.PROXIMITY_BONUS_MAX);
-    const extraDef = Math.min(prox.def, M.PROXIMITY_BONUS_MAX);
-    this._seedStones('atk', extraAtk);
-    this._seedStones('def', extraDef);
+    // 시작 돌 — 양 끝 + 보급선 보너스 (서버 권위 모드에선 서버 스냅샷이 제공)
+    if (!this.serverAuth) {
+      const prox = battleOpts.proximity || { atk:0, def:0 };
+      const extraAtk = Math.min(prox.atk, M.PROXIMITY_BONUS_MAX);
+      const extraDef = Math.min(prox.def, M.PROXIMITY_BONUS_MAX);
+      this._seedStones('atk', extraAtk);
+      this._seedStones('def', extraDef);
+    }
 
     const tribeNote = this.tribeAdv
       ? (this.tribeAdv === this.mySide ? ' · 🔺상성 우세(+15%)' : ' · 🔻상성 열세')
@@ -75,7 +99,10 @@ export class Battle {
     this.focusTargetId = null;          // 집중공격 적 stone id
     this._drag = null;                  // {x0,y0,x1,y1,active}
 
-    if (this.pvp && this.socket) this._setupNet();
+    if (this.pvp && this.socket) {
+      if (this.serverAuth) this._setupAuthNet();
+      else this._setupNet();
+    }
     this._countdown();
   }
 
@@ -134,10 +161,12 @@ export class Battle {
     if (!el) { this._begin(); return; }
     let n = this.M.COUNTDOWN_SEC;
     el.style.display = 'flex'; el.textContent = n;
+    SFX.count();
     const tick = () => {
       n--;
-      if (n <= 0) { el.style.display = 'none'; this._begin(); return; }
+      if (n <= 0) { el.style.display = 'none'; SFX.go(); this._begin(); return; }
       el.textContent = n;
+      SFX.count();
       setTimeout(tick, 1000);
     };
     setTimeout(tick, 1000);
@@ -188,6 +217,7 @@ export class Battle {
     if (d.dragged) {
       // 드래그 라쏘: 사각형 안의 내 돌 다중 선택 (Set에 추가)
       this._lassoSelect(d.x0, d.y0, d.x1, d.y1);
+      if (this.serverAuth && this.focusTargetId != null) this._sendFocus();
       return;
     }
     // 짧은 탭
@@ -202,12 +232,15 @@ export class Battle {
         // 내 돌 → 선택 토글
         if (this.selSet.has(hit.id)) this.selSet.delete(hit.id);
         else this.selSet.add(hit.id);
+        if (this.serverAuth && this.focusTargetId != null) this._sendFocus();
         return;
       }
       // 적 돌
       if (this.selSet.size > 0) {
         // 집중 공격: 선택된 돌들이 이 적만 공격
         this.focusTargetId = hit.id;
+        SFX.focus();
+        if (this.serverAuth) this._sendFocus();
         return;
       }
       return;   // 선택 없이 적 탭은 무시
@@ -222,6 +255,16 @@ export class Battle {
     }
     if (this.placeCD[this.mySide] > 0) return;
     if (this._tooClose(x, y)) { this._tooCloseFlash = performance.now(); return; }
+    if (this.serverAuth) {
+      // 서버 권위: 입력만 전송 (서버 검증 후 스냅샷으로 돌 등장)
+      this.socket.emit('pvp:input', { battleId: this.battleId, action: {
+        type: 'place',
+        x: (x - this.arena.cx) / this.scale,
+        y: (y - this.arena.cy) / this.scale,
+      }});
+      this.placeCD[this.mySide] = this.M.PLACE_COOLDOWN;   // 낙관적 쿨다운 (연타 방지)
+      return;
+    }
     this._place(this.mySide, x, y, cost);
   }
 
@@ -242,14 +285,34 @@ export class Battle {
       if (s.x >= xa && s.x <= xb && s.y >= ya && s.y <= yb) this.selSet.add(s.id);
     }
   }
-  _clearSel() { this.selSet.clear(); this.focusTargetId = null; }
+  _clearSel() {
+    this.selSet.clear(); this.focusTargetId = null;
+    if (this.serverAuth && this.socket && this.battleId) {
+      this.socket.emit('pvp:input', { battleId: this.battleId, action: { type:'focus', targetId: null, ids: [] } });
+    }
+  }
+  // 서버에 집중공격 상태 전송 (선택 변경/타깃 지정 시)
+  _sendFocus() {
+    if (!this.socket || !this.battleId) return;
+    this.socket.emit('pvp:input', { battleId: this.battleId, action: {
+      type: 'focus', targetId: this.focusTargetId, ids: [...this.selSet],
+    }});
+  }
   _stoneById(id) {
     if (id == null) return null;
     for (const s of this.stones) if (s.id === id) return s;
     return null;
   }
   // 항복 — 즉시 패배 처리 (전투에서 빠져나갈 길)
-  forfeit() { if (this.running) this._end(this.foeSide); }
+  forfeit() {
+    if (!this.running) return;
+    if (this.serverAuth) { this.socket.emit('pvp:forfeit', { battleId: this.battleId }); return; }
+    this._end(this.foeSide);
+  }
+  // 서버 판정 수신 → 종료 (pvp:end)
+  endFromServer(winner) {
+    this._end(winner === 'attacker' ? 'atk' : 'def');
+  }
 
   _place(side, x, y, cost) {
     const c = cost != null ? cost : this._ringCost(x, y);
@@ -258,6 +321,7 @@ export class Battle {
     const st = this._mkStone(side, x, y);
     this.stones.push(st);
     this._spawnFx(x, y, side);
+    SFX.place();
     if (side === this.mySide && this.pvp && this.socket) {
       this.socket.emit('battle:action', { battleId:this.battleId, action:{ type:'place', id:st.id, x, y } });
     }
@@ -282,6 +346,7 @@ export class Battle {
       sx, sy, tid: to.id, target: to,
       x: sx, y: sy, t: 0, dur, side: from.side, focused,
     });
+    if (from.side === this.mySide) SFX.fire(focused);
   }
   _updateProj(dt) {
     if (!this._proj) return;
@@ -292,6 +357,7 @@ export class Battle {
         // 도착 — 임팩트 페인트
         this._fx = this._fx || [];
         this._fx.push({ x: p.x, y: p.y, life: 0.18, max: 0.18, side: p.side, hit: true });
+        SFX.hit();
         this._proj.splice(i, 1);
         continue;
       }
@@ -368,6 +434,7 @@ export class Battle {
 
   // ====== 시뮬레이션 한 틱 ======
   _update(dt) {
+    if (this.serverAuth) return this._updateAuth(dt);
     // 생산 (각 돌의 *링별* 소득 합산 + 영웅 보너스)
     let rateAtk = 0, rateDef = 0;
     for (const s of this.stones) {
@@ -440,12 +507,13 @@ export class Battle {
       if (s.hp > 0) continue;
       if (this.pvp && s.remote) continue;
       const inc = incoming.get(i);
-      if (!inc) { this.stones.splice(i, 1); continue; }
+      if (!inc) { this.stones.splice(i, 1); SFX.death(); continue; }
       // 다수 공격자 진영으로 변환 (동수면 그냥 죽음)
-      if (inc.atk === inc.def) { this.stones.splice(i, 1); continue; }
+      if (inc.atk === inc.def) { this.stones.splice(i, 1); SFX.death(); continue; }
       const winnerSide = inc.atk > inc.def ? 'atk' : 'def';
       if (winnerSide === s.side) {
         this.stones.splice(i, 1);
+        SFX.death();
       } else if (this.pvp && s.side === this.mySide) {
         // 내 돌이 상대 진영으로 변환 — 로컬 제거 + 상대에게 통지 (상대가 자기 돌로 추가)
         this.socket.emit('battle:action', {
@@ -458,6 +526,7 @@ export class Battle {
         s.side = winnerSide;
         s.hp = this.M.FLIP_HP;
         s.flippedAt = performance.now();
+        SFX.flip();
         // 선택/집중에서도 정리
         this.selSet.delete(s.id);
         if (this.focusTargetId === s.id) this.focusTargetId = null;
@@ -527,6 +596,106 @@ export class Battle {
     if (remain <= 0) {
       return this._end(myN >= foeN ? this.mySide : this.foeSide);
     }
+  }
+
+  // ====== 서버 권위 모드: 스냅샷 수신/시각 전용 틱 ======
+  _setupAuthNet() {
+    if (this._authBound) return; this._authBound = true;
+    this.socket.on('pvp:state', (snap) => {
+      if (this.serverAuth && snap.battleId === this.battleId) this._applySnapshot(snap);
+    });
+  }
+
+  _applySnapshot(snap) {
+    this._srvRemain = snap.remain;
+    this.energy.atk = snap.energy.atk;
+    this.energy.def = snap.energy.def;
+    const prev = new Map(this.stones.map((t) => [t.id, t]));
+    const next = [];
+    for (const t of snap.stones) {
+      const px = this.arena.cx + t.x * this.scale;
+      const py = this.arena.cy + t.y * this.scale;
+      const old = prev.get(t.id);
+      const st = old || { id: t.id, born: performance.now() };
+      if (old && old.side !== t.side) {
+        // 변환 (오델로) — 서버가 결정, 클라는 연출
+        st.flippedAt = performance.now();
+        SFX.flip();
+        if (t.side !== this.mySide) {
+          this.selSet.delete(t.id);
+          if (this.focusTargetId === t.id) this.focusTargetId = null;
+        }
+      }
+      if (!old && this._gotSnap) { this._spawnFx(px, py, t.side); SFX.place(); }
+      st.side = t.side; st.x = px; st.y = py; st.hp = t.hp;
+      prev.delete(t.id);
+      next.push(st);
+    }
+    // 사라진 돌 = 사망 연출
+    for (const [, old] of prev) {
+      if (this._gotSnap) {
+        this._fx = this._fx || [];
+        this._fx.push({ x: old.x, y: old.y, life: 0.3, max: 0.3, side: old.side, hit: true });
+        SFX.death();
+      }
+      this.selSet.delete(old.id);
+      if (this.focusTargetId === old.id) this.focusTargetId = null;
+    }
+    this.stones = next;
+    // 상대의 집중공격 경고 표시
+    const foeF = snap.focus && snap.focus[this.foeSide];
+    this._incomingFocus = (foeF && this.stones.some((s) => s.id === foeF.targetId && s.side === this.mySide))
+      ? { id: foeF.targetId, count: foeF.count } : null;
+    this._gotSnap = true;
+  }
+
+  // 서버 권위 모드의 로컬 틱 — 시각 효과·HUD만 (판정·데미지는 전부 서버)
+  _updateAuth(dt) {
+    this.placeCD[this.mySide] = Math.max(0, this.placeCD[this.mySide] - dt);
+
+    // 시각 포탄 — 스냅샷 돌 위치 기준으로 발사 연출
+    const range = this.ATTACK_RANGE + this.STONE_R * 2;
+    const focusTgt = this._stoneById(this.focusTargetId);
+    const focusTgtAlive = !!focusTgt && focusTgt.side !== this.mySide;
+    for (const a of this.stones) {
+      a._fireCD = (a._fireCD || 0) - dt;
+      if (a._fireCD > 0) continue;
+      if (a.side === this.mySide && this.selSet.has(a.id) && focusTgtAlive) {
+        this._spawnProj(a, focusTgt, true); a._fireCD = 0.18; continue;
+      }
+      for (const b of this.stones) {
+        if (a.side === b.side) continue;
+        if (Math.hypot(a.x - b.x, a.y - b.y) <= range) {
+          this._spawnProj(a, b, false); a._fireCD = 0.28; break;
+        }
+      }
+    }
+    if (this._fx) {
+      for (let i = this._fx.length - 1; i >= 0; i--) {
+        this._fx[i].life -= dt;
+        if (this._fx[i].life <= 0) this._fx.splice(i, 1);
+      }
+    }
+    this._updateProj(dt);
+
+    // HUD — 서버 스냅샷 기준
+    const myN = this.stones.filter((s) => s.side === this.mySide).length;
+    const foeN = this.stones.filter((s) => s.side === this.foeSide).length;
+    document.getElementById('meE').textContent = Math.floor(this.energy[this.mySide]);
+    document.getElementById('enE').textContent = Math.floor(this.energy[this.foeSide]);
+    const remain = this._srvRemain ?? this.M.MAX_T;
+    const timerEl = document.getElementById('bTimer');
+    const countEl = document.getElementById('bCount');
+    if (timerEl) {
+      const m = Math.floor(remain / 60), sec = Math.floor(remain % 60);
+      timerEl.textContent = `${m}:${String(sec).padStart(2, '0')}`;
+      timerEl.classList.toggle('urgent', remain <= 15);
+    }
+    if (countEl) {
+      countEl.textContent = `● ${myN} vs ${foeN}`;
+      countEl.className = 'bcount ' + (myN > foeN ? 'lead' : myN < foeN ? 'behind' : 'even');
+    }
+    // 종료는 서버 pvp:end로만 — 로컬 판정 없음
   }
 
   // ====== 렌더 ======
@@ -707,6 +876,7 @@ export class Battle {
     if (!this.running) return true;
     this.running = false;
     const iWon = (winnerSide === this.mySide);
+    if (iWon) SFX.win(); else SFX.lose();
     this.onEnd(iWon ? (this.mySide === 'atk' ? 'attacker' : 'defender')
                     : (this.mySide === 'atk' ? 'defender' : 'attacker'));
     return true;
@@ -725,6 +895,7 @@ export class Battle {
         st.hp = this.M.FLIP_HP;
         st.flippedAt = performance.now();
         this.stones.push(st);
+        SFX.flip();
       }
     });
     this.socket.on('battle:state', (s) => {

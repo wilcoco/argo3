@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>BACTERIA WAR</title>
-<link rel="stylesheet" href="/css/style.css?v=25">
+<link rel="stylesheet" href="/css/style.css?v=26">
 </head>
 <body>
 <div id="app">
@@ -45,6 +45,7 @@
       <button id="zoomMe" class="zoom-btn" title="내 위치로">◎</button>
       <button id="zoomMyCells" class="zoom-btn" title="내 영토로 (반복 탭: 순환)">🏰</button>
       <button id="lbBtn" class="zoom-btn" title="영토 순위">🏆</button>
+      <button id="questBtn" class="zoom-btn" title="오늘의 퀘스트">📜<span class="q-dot hidden" id="questDot"></span></button>
     </div>
     <div class="eco-bar" id="ecoBar"></div>
 
@@ -67,6 +68,7 @@
       </div>
       <div class="placebtns">
         <button class="btn ghost" id="clearSel">선택 해제</button>
+        <button class="btn ghost" id="muteBtn" title="소리 켜기/끄기">🔊</button>
         <button class="btn ghost danger-text" id="forfeitBtn">항복</button>
       </div>
     </div>
@@ -92,6 +94,6 @@
 </div>
 
 <script src="/socket.io/socket.io.js"></script>
-<script type="module" src="/js/app.js?v=25"></script>
+<script type="module" src="/js/app.js?v=26"></script>
 </body>
 </html>

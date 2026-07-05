@@ -6,6 +6,7 @@ import { query, tx } from '../db/pool.js';
 import { CONFIG, tribeBeats, densityMult, maxBet } from './config.js';
 import { latLngToCell, cellToLatLng, cellNeighbors, haversineM } from './geo.js';
 import { simulateBattle, estimateWinProb } from './battle.js';
+import { incQuest } from './quests.js';
 
 const MAC = CONFIG.MACRO;
 const ECO = CONFIG.ECOSYSTEM;
@@ -93,6 +94,7 @@ export async function harvestAll(playerId) {
       harvested += take; room -= take;
     }
     await client.query(`UPDATE players SET energy = energy + $1::real WHERE id=$2`, [harvested, playerId]);
+    await incQuest(client, playerId, 'harvest', harvested);
     return { harvested, towers: cells.length, energy: Number(p.energy) + harvested };
   });
 }
@@ -373,6 +375,27 @@ function tribeAdvOf(atk, def) {
   return null;
 }
 
+// PvP 아레나 생성용 전투 컨텍스트 — 서버가 직접 재계산 (클라 값 신뢰 안 함)
+export async function getBattleContext(battleId) {
+  const b = (await query(`SELECT * FROM battles WHERE id=$1`, [Number(battleId)])).rows[0];
+  if (!b || b.status !== 'active') return null;
+  const cell = (await query(`SELECT * FROM cells WHERE id=$1`, [b.cell_id])).rows[0];
+  const atk = (await query(`SELECT * FROM players WHERE id=$1`, [b.attacker_id])).rows[0];
+  const def = (await query(`SELECT * FROM players WHERE id=$1`, [b.defender_id])).rows[0];
+  if (!cell || !atk || !def) return null;
+  const shim = { query };   // countProximityCells는 client 인터페이스만 필요
+  const proximity = await countProximityCells(
+    shim, Number(cell.lat), Number(cell.lng),
+    CONFIG.MICRO.PROXIMITY_RADIUS_M, b.attacker_id, b.defender_id);
+  return {
+    atkId: b.attacker_id, defId: b.defender_id,
+    atkBet: Number(b.atk_bet), defBet: Number(b.def_bet),
+    proximity,
+    hero: { atk: !!atk.is_hero, def: !!def.is_hero },
+    tribeAdv: tribeAdvOf(atk, def),
+  };
+}
+
 // 큐의 다음 도전자를 꺼내 전투 시작. 호출자가 socket으로 알림 보내야 함.
 // 도전자가 더 이상 자격 안 되면(에너지 부족 등) 스킵하고 다음을 시도.
 export async function popNextChallenger(cellId) {
@@ -439,6 +462,7 @@ export async function harvestCell(playerId, cellId, amount) {
     }
     await client.query(`UPDATE cells SET stored_energy = stored_energy - $1::real WHERE id=$2`, [harvested, cellId]);
     await client.query(`UPDATE players SET energy = energy + $1::real WHERE id=$2`, [harvested, playerId]);
+    await incQuest(client, playerId, 'harvest', harvested);
     return {
       harvested,
       stored: stored - harvested,
@@ -572,6 +596,9 @@ export async function resolveChallenge(battleId, opts = {}) {
       const atk = (await client.query(`SELECT * FROM players WHERE id=$1`, [b.attacker_id])).rows[0];
       const loot = Number(cell.stored_energy) || 0;
       reward = { defBet: Number(b.def_bet), loot, cellValue: Number(cell.value) };
+      // 데일리 퀘스트 진행
+      await incQuest(client, b.attacker_id, 'win', 1);
+      if (loot >= 1) await incQuest(client, b.attacker_id, 'raid', 1);
       await client.query(
         `UPDATE cells SET owner_id=$1, tribe=$2, def_bet=$3, def_wins=0, exempt_until=NULL, stored_energy=0 WHERE id=$4`,
         [b.attacker_id, atk.tribe, Math.min(cell.value, b.atk_bet), cell.id]
@@ -589,6 +616,7 @@ export async function resolveChallenge(battleId, opts = {}) {
         [b.atk_bet, b.attacker_id]);
       await client.query(`UPDATE players SET energy = LEAST(energy + $1::real, $2::real) WHERE id=$3`,
         [Number(b.atk_bet), MAC.MAX_ENERGY, b.defender_id]);
+      await incQuest(client, b.defender_id, 'win', 1);   // 방어 승리도 전투 승리 퀘스트
       const newWins = cell.def_wins + 1;
       let exemptUntil = null;
       if (newWins >= CONFIG.EXEMPT.WINS) {

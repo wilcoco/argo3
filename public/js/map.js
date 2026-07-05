@@ -19,6 +19,8 @@ export class MacroMap {
     this.claimRadiusM = opts.claimRadiusM || 1000;
     this.capFactor = opts.capFactor || 3;        // 타워 저장 상한 배율 (게이지용)
     this.lootShowMin = opts.lootShowMin || 10;   // 이 이상 저장된 적 셀 = 지도에 약탈 표시
+    this.proximityM = opts.proximityM || 800;    // 보급선 반경 (전투 시작 돌 보너스)
+    this._clusterLinks = [];                     // 내 셀 간 보급선 (setCells에서 계산)
     this.myLoc = null;          // {lat, lng, acc}
     this.minZoom = opts.minZoom || 11;   // 더 멀리 — 약 30km 시야
     this.maxZoom = opts.maxZoom || 18;   // 더 가깝게 — 골목 단위
@@ -123,7 +125,49 @@ export class MacroMap {
     this.canvas.width = r.width * dpr; this.canvas.height = r.height * dpr;
     this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   }
-  setCells(cells) { this.cells = cells; }
+  setCells(cells) {
+    this.cells = cells;
+    this._computeClusterLinks();
+  }
+
+  // 내 셀 간 보급선 사전 계산 (렌더마다 O(N²) 피함)
+  _computeClusterLinks() {
+    const links = [];
+    const mine = (this.cells || []).filter((c) => c.owner_id === this.myId && c.lat != null);
+    const R = 6371000, toRad = (d) => (d * Math.PI) / 180;
+    for (let i = 0; i < mine.length; i++) {
+      for (let j = i + 1; j < mine.length; j++) {
+        const a = mine[i], b = mine[j];
+        const dLat = toRad(Number(b.lat) - Number(a.lat));
+        const dLng = toRad(Number(b.lng) - Number(a.lng));
+        const h = Math.sin(dLat/2)**2 +
+          Math.cos(toRad(Number(a.lat))) * Math.cos(toRad(Number(b.lat))) * Math.sin(dLng/2)**2;
+        const d = 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
+        if (d <= this.proximityM) links.push({ a, b });
+      }
+    }
+    this._clusterLinks = links;
+  }
+
+  // 보급선 렌더 — 내 영토 네트워크가 눈에 보이게 (전투 시작 돌 보너스의 근거)
+  _drawClusterLinks() {
+    if (!this._clusterLinks.length) return;
+    const ctx = this.ctx;
+    const t = (Date.now() % 2400) / 2400;   // 흐르는 대시 애니메이션
+    ctx.save();
+    ctx.strokeStyle = 'rgba(58,209,200,0.35)';
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([8, 6]);
+    ctx.lineDashOffset = -t * 14;
+    for (const { a, b } of this._clusterLinks) {
+      const p1 = this.geo2screen(Number(a.lat), Number(a.lng));
+      const p2 = this.geo2screen(Number(b.lat), Number(b.lng));
+      if ((p1.x < -60 && p2.x < -60) || (p1.x > this.W+60 && p2.x > this.W+60)) continue;
+      ctx.beginPath(); ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y); ctx.stroke();
+    }
+    ctx.setLineDash([]);
+    ctx.restore();
+  }
   setView(lat, lng) { this.view = { lat, lng }; }
   setMyLoc(loc) { this.myLoc = loc; }
   setPreviewCell(p) { this.previewCell = p; } // {lat, lng, value} or null
@@ -246,6 +290,7 @@ export class MacroMap {
 
   _drawCells() {
     const ctx = this.ctx;
+    this._drawClusterLinks();   // 셀 아래 레이어에 보급선
     for (const c of this.cells) {
       if (c.lat == null) continue;
       const p = this.geo2screen(Number(c.lat), Number(c.lng));

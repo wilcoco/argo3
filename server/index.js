@@ -9,10 +9,12 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { router as apiRouter } from './routes/api.js';
-import { ecosystemTick, processQueueTick, raiseDefenseBet } from './game/macro.js';
+import { ecosystemTick, processQueueTick, raiseDefenseBet, getBattleContext, resolveChallenge } from './game/macro.js';
 import { CONFIG } from './game/config.js';
 import { initDb } from './db/init.js';
 import { recordReport, sweepReports } from './game/reports.js';
+import { PvpArena } from './game/pvpArena.js';
+import { emitActivity } from './game/activity.js';
 
 dotenv.config();
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -37,6 +39,33 @@ app.set('io', io);   // REST 라우트에서 활동 피드 브로드캐스트용
 const onlinePlayers = new Map();
 // 응답 대기 중인 도전: battleId -> { resolved, timer, attackerSocket }
 const pendingChallenges = new Map();
+// 서버 권위 PvP 아레나: battleId -> PvpArena
+const arenas = new Map();
+
+// PvP 아레나 시작 — 서버가 시뮬·판정·정산까지 전부 소유 (클라 위조 원천 차단)
+async function startArena(battleId) {
+  const id = Number(battleId);
+  if (arenas.has(id)) return arenas.get(id);
+  const ctx = await getBattleContext(id);
+  if (!ctx) return null;
+  const room = `battle:${id}`;
+  const arena = new PvpArena(id, ctx, {
+    broadcast: (event, payload) => io.to(room).emit(event, payload),
+    onEnd: async (winner) => {
+      arenas.delete(id);
+      try {
+        const result = await resolveChallenge(id, { pvpWinner: winner });
+        io.to(room).emit('pvp:end', { battleId: id, winner, result });
+        emitActivity(io, result);
+      } catch (e) {
+        console.error('PvP 정산 오류:', e.message);
+        io.to(room).emit('pvp:end', { battleId: id, winner, result: { winner } });
+      }
+    },
+  });
+  arenas.set(id, arena);
+  return arena;
+}
 
 // ---- Socket.IO: 실시간 매크로 동기화 + 전투 ----
 io.on('connection', (socket) => {
@@ -106,6 +135,7 @@ io.on('connection', (socket) => {
   });
 
   // 방어자가 수락 — newDefBet 있으면 방어 베팅 재설정 (올리기만 허용, 명세서 2.6)
+  // 수락 즉시 서버 권위 아레나 생성: 시뮬·판정·정산 전부 서버.
   socket.on('challenge:accept', async ({ battleId, newDefBet }) => {
     const pc = pendingChallenges.get(battleId);
     if (!pc || pc.resolved) {
@@ -116,18 +146,37 @@ io.on('connection', (socket) => {
     pc.resolved = true;
     clearTimeout(pc.timer);
     pendingChallenges.delete(battleId);
-    let defBet = null;
     if (newDefBet != null && socket.data.playerId != null) {
       try {
-        const r = await raiseDefenseBet(battleId, socket.data.playerId, Number(newDefBet));
-        defBet = r.defBet;
+        await raiseDefenseBet(battleId, socket.data.playerId, Number(newDefBet));
       } catch (e) { /* 재설정 실패 — 기존 베팅 유지 */ }
     }
     const room = `battle:${battleId}`;
     socket.join(room);
-    // 양쪽에게 PvP 시작 통지 (재설정된 방어 베팅 포함)
-    io.to(room).emit('challenge:pvp_start', { battleId, defBet });
-    io.to(pc.attackerSocket).emit('challenge:pvp_start', { battleId, defBet });
+    const arena = await startArena(battleId);
+    if (!arena) {
+      // 아레나 생성 실패 (전투 무효) — 도전자에게 AI 폴백
+      io.to(pc.attackerSocket).emit('challenge:fallback_ai', { battleId });
+      return;
+    }
+    const payload = {
+      battleId, serverAuth: true,
+      atkBet: arena.energy.atk, defBet: arena.energy.def,
+      hero: arena.hero, tribeAdv: arena.tribeAdv,
+    };
+    io.to(room).emit('challenge:pvp_start', payload);
+    io.to(pc.attackerSocket).emit('challenge:pvp_start', payload);
+  });
+
+  // 서버 권위 PvP 입력 — 서버가 전부 검증
+  socket.on('pvp:input', ({ battleId, action }) => {
+    const arena = arenas.get(Number(battleId));
+    if (arena && socket.data.playerId != null) arena.input(socket.data.playerId, action);
+  });
+  // PvP 항복
+  socket.on('pvp:forfeit', ({ battleId }) => {
+    const arena = arenas.get(Number(battleId));
+    if (arena && socket.data.playerId != null) arena.forfeit(socket.data.playerId);
   });
 
   // 방어자가 거절

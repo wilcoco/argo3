@@ -11,6 +11,8 @@ import { query } from '../db/pool.js';
 import { estimateWinProb } from '../game/battle.js';
 import { CONFIG } from '../game/config.js';
 import { getReports, clearReports } from '../game/reports.js';
+import { listQuests, claimQuest } from '../game/quests.js';
+import { emitActivity } from '../game/activity.js';
 
 export const router = express.Router();
 
@@ -97,26 +99,7 @@ router.post('/challenge/:id/resolve', async (req, res) => {
     });
     clearReports(battleId);
     // 활동 피드 — 살아있는 세계 감각 (전투 결과를 전체에 브로드캐스트)
-    const io = req.app.get('io');
-    if (io && result.names) {
-      const { attacker, defender } = result.names;
-      let text;
-      if (result.winner === 'attacker') {
-        const lootTxt = result.reward?.loot >= 1 ? ` (+⚡${Math.round(result.reward.loot)} 약탈)` : '';
-        text = `⚔ ${attacker}님이 ${defender}님의 거점(가치 ${result.cellValue})을 점령!${lootTxt}`;
-      } else {
-        text = `🛡 ${defender}님이 ${attacker}님의 도전을 격퇴!`;
-      }
-      io.emit('activity', { text, t: Date.now() });
-      if (result.death) {
-        io.emit('activity', {
-          text: result.death.heroRolled
-            ? `👑 ${defender}님이 모든 영토를 잃었지만 영웅으로 환생!`
-            : `💀 ${defender}님의 영토가 전멸했습니다`,
-          t: Date.now(),
-        });
-      }
-    }
+    emitActivity(req.app.get('io'), result);
     res.json(result);
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
@@ -132,6 +115,20 @@ router.post('/harvestall', async (req, res) => {
   try {
     const { playerId } = req.body;
     res.json(await harvestAll(Number(playerId)));
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+// 데일리 퀘스트 — 오늘 목록 + 진행
+router.get('/quests/:playerId', async (req, res) => {
+  try { res.json(await listQuests(Number(req.params.playerId))); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// 퀘스트 보상 수령
+router.post('/quests/claim', async (req, res) => {
+  try {
+    const { playerId, key } = req.body;
+    res.json(await claimQuest(Number(playerId), String(key)));
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 

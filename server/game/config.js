@@ -134,6 +134,13 @@ export const CONFIG = {
     WEAK_BOOST_POWER: 2,
   },
 
+  // ---- 데일리 퀘스트 (KST 자정 리셋) ----
+  QUESTS: [
+    { key: 'win',     icon: '⚔',  label: '전투 3회 승리',    target: 3,   reward: 60 },
+    { key: 'raid',    icon: '💰', label: '약탈 2회 성공',    target: 2,   reward: 50 },
+    { key: 'harvest', icon: '🧺', label: '에너지 100 수확',  target: 100, reward: 40 },
+  ],
+
   // ---- 시작 자원 ----
   START_ENERGY: 100,
 };

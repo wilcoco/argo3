@@ -194,3 +194,29 @@ input[type=range]{flex:1;accent-color:var(--pl);height:4px;}
 
 /* 결과 화면 보상 목록 */
 .reward-list{display:inline-block;margin-top:8px;line-height:2;color:var(--fg);font-size:14px;}
+
+/* 데일리 퀘스트 */
+.zoom-btn{position:relative;}
+.q-dot{position:absolute;top:4px;right:4px;width:8px;height:8px;border-radius:50%;
+  background:var(--en);animation:qDotPulse 1.2s infinite;}
+@keyframes qDotPulse{0%,100%{transform:scale(1)}50%{transform:scale(1.4)}}
+.quest-list{display:flex;flex-direction:column;gap:8px;margin:12px 0 14px;}
+.quest-row{display:flex;align-items:center;gap:10px;padding:10px;border-radius:10px;
+  background:rgba(255,255,255,.04);}
+.quest-row.ready{border:1px solid var(--gold);background:rgba(255,224,110,.07);}
+.q-icon{font-size:20px;min-width:28px;text-align:center;}
+.q-body{flex:1;min-width:0;}
+.q-label{font-size:12px;font-weight:700;margin-bottom:5px;}
+.q-bar{height:6px;background:rgba(255,255,255,.08);border-radius:3px;overflow:hidden;}
+.q-fill{height:100%;background:var(--pl);border-radius:3px;transition:width .3s;}
+.quest-row.ready .q-fill{background:var(--gold);}
+.q-state{min-width:70px;text-align:right;font-size:11px;}
+.q-state .btn{padding:6px 10px;font-size:11px;}
+.q-done{color:var(--pl);font-weight:700;}
+
+/* 보급선 (클러스터 시너지) */
+.supply-line{font-size:11px;padding:7px 10px;border-radius:8px;margin:8px 0;
+  background:rgba(58,209,200,.06);border:1px solid rgba(58,209,200,.25);}
+.supply-line.good{border-color:var(--pl);color:var(--pl);}
+.supply-line.bad{border-color:var(--en);background:rgba(255,93,115,.06);color:var(--en);}
+.supply-line.dim-line{border-color:rgba(255,255,255,.12);color:var(--dim);background:rgba(255,255,255,.03);}
