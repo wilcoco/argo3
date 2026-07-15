@@ -250,12 +250,14 @@ export class Battle {
     if (!this._inArena(x, y)) { this._outsideFlash = performance.now(); return; }
     const cost = this._ringCost(x, y);
     if (this.energy[this.mySide] < cost) {
-      this._notEnoughFlash = performance.now();
-      this._notEnoughCost = cost;
+      this._feedback = { t: performance.now(), text: `⚡ 에너지 부족 — 이 위치는 ⚡${cost} 필요`, x, y };
       return;
     }
     if (this.placeCD[this.mySide] > 0) return;
-    if (this._tooClose(x, y)) { this._tooCloseFlash = performance.now(); return; }
+    if (this._tooClose(x, y)) {
+      this._feedback = { t: performance.now(), text: '돌이 너무 가까움', x, y };
+      return;
+    }
     if (this.serverAuth) {
       // 서버 권위: 입력만 전송 (서버 검증 후 스냅샷으로 돌 등장)
       this.socket.emit('pvp:input', { battleId: this.battleId, action: {
@@ -605,7 +607,8 @@ export class Battle {
   _setupAuthNet() {
     if (this._authBound) return; this._authBound = true;
     this.socket.on('pvp:state', (snap) => {
-      if (this.serverAuth && snap.battleId === this.battleId) this._applySnapshot(snap);
+      // battleId는 REST에선 문자열(BIGSERIAL), 서버 스냅샷에선 숫자 — 반드시 숫자로 비교
+      if (this.serverAuth && Number(snap.battleId) === Number(this.battleId)) this._applySnapshot(snap);
     });
   }
 
@@ -849,6 +852,18 @@ export class Battle {
           ctx.lineWidth = 2; ctx.stroke();
         }
       }
+    }
+
+    // 입력 거부 피드백 — 탭이 왜 무시됐는지 그 자리에서 알려준다
+    if (this._feedback) {
+      const age = (performance.now() - this._feedback.t) / 1000;
+      if (age < 1.1) {
+        const a = Math.max(0, 1 - age);
+        ctx.fillStyle = `rgba(255,93,115,${a})`;
+        ctx.font = 'bold 12px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(this._feedback.text, this._feedback.x, this._feedback.y - 18 - age * 12);
+      } else this._feedback = null;
     }
 
     // 에너지 방치 넛지 — 쌓아두면 진다: 6초 이상 안 두고 2배 이상 모였으면 안내

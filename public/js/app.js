@@ -133,6 +133,7 @@ function initGame() {
 
   // 전투 인스턴스
   battle = new Battle($('battleCanvas'), CFG, { onEnd: onBattleEnd });
+  window._bw_battle = battle;   // E2E 테스트/디버그 핸들
   $('ovBack').addEventListener('click', () => { show('macroScreen'); refreshCells(); refreshMe(); });
 
   // 줌 버튼
