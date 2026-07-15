@@ -65,6 +65,7 @@ export class Battle {
     this._incomingFocus = null;                     // 상대의 집중공격 정보 {id, count}
     // 서버 권위 모드 (PvP) — 클라는 입력 전송 + 스냅샷 렌더만
     this.serverAuth = !!battleOpts.serverAuth;
+    this.aiStrength = battleOpts.aiStrength ?? M.AI_STRENGTH;   // 봇 셀이면 약한 AI
     if (this.serverAuth) {
       // 서버 좌표계(반경 230) → 화면 스케일. 돌은 안 움직이므로 보간 불필요.
       this.SRV_R = 230;
@@ -263,6 +264,7 @@ export class Battle {
         y: (y - this.arena.cy) / this.scale,
       }});
       this.placeCD[this.mySide] = this.M.PLACE_COOLDOWN;   // 낙관적 쿨다운 (연타 방지)
+      this._lastPlaceMs = performance.now();
       return;
     }
     this._place(this.mySide, x, y, cost);
@@ -322,6 +324,7 @@ export class Battle {
     this.stones.push(st);
     this._spawnFx(x, y, side);
     SFX.place();
+    if (side === this.mySide) this._lastPlaceMs = performance.now();
     if (side === this.mySide && this.pvp && this.socket) {
       this.socket.emit('battle:action', { battleId:this.battleId, action:{ type:'place', id:st.id, x, y } });
     }
@@ -380,7 +383,7 @@ export class Battle {
     if (this.pvp) return;
     this.aiTimer -= dt;
     if (this.aiTimer > 0) return;
-    const S = this.M.AI_STRENGTH;
+    const S = this.aiStrength;
     this.aiTimer = 0.35 + (1 - S) * 0.6 + Math.random() * 0.4;
     const side = this.foeSide;
     // 어떤 링이든 outer는 살 수 있어야 시도 가치 있음
@@ -846,6 +849,17 @@ export class Battle {
           ctx.lineWidth = 2; ctx.stroke();
         }
       }
+    }
+
+    // 에너지 방치 넛지 — 쌓아두면 진다: 6초 이상 안 두고 2배 이상 모였으면 안내
+    if (this.running &&
+        this.energy[this.mySide] >= this.M.RING_OUTER_COST * 2 &&
+        performance.now() - (this._lastPlaceMs || this.startT) > 6000) {
+      const pulse = 0.55 + 0.45 * Math.sin(performance.now() / 250);
+      ctx.fillStyle = `rgba(255,224,110,${pulse})`;
+      ctx.font = 'bold 13px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('⚡ 에너지가 쌓였다 — 빈 곳을 탭해 돌을 두자!', this.W / 2, 30);
     }
 
     // 선택 카운트 / 집중 안내

@@ -65,7 +65,8 @@ export const CONFIG = {
     ARENA_RATIO: 0.42,         // 아레나 반경 = min(W,H) * 이 값
     COUNTDOWN_SEC: 3,
     DEFENSE_WAIT_SEC: 15,      // 방어자 응답 대기 시간 (초). 미응답 시 AI 폴백.
-    AI_STRENGTH: 0.85,         // 자동방어 AI 강도
+    AI_STRENGTH: 0.85,         // 자동방어 AI 강도 (오프라인 실플레이어 보호)
+    BOT_AI_STRENGTH: 0.5,      // 봇 셀 방어 AI — 봇은 먹잇감: 평범한 유저가 이겨야 한다
 
     // 돌(탑) 균일 — 크기·HP·비용 고정
     STONE_R: 18,               // 돌 반경 (px)

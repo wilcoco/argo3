@@ -475,6 +475,7 @@ function openClaim(lat, lng) {
         // 셀 목록에서 cellId 찾기 — 전체 정보(def_bet, username, ...)
         const fullCell = (macro.cells || []).find((c) => Number(c.id) === Number(cs.cellId));
         closeSheet();
+        toast('⚔ 적 영역과 너무 가까움 — 점유 대신 도전으로 전환됩니다');
         if (fullCell) openCell(fullCell);
         else toast('적 영역과 인접 — 직접 셀을 탭해 도전');
         return;
@@ -562,7 +563,7 @@ function openCell(c) {
   // 보급선 예측 — 전투 시작 돌 수 (클러스터 시너지의 실전 의미)
   const maxProx = CFG.MICRO.PROXIMITY_BONUS_MAX;
   const myProx = Math.min(countNearby(Number(c.lat), Number(c.lng), me.id), maxProx);
-  const defProx = Math.min(countNearby(Number(c.lat), Number(c.lng), c.owner_id, c.id), maxProx);
+  const defProx = c.is_bot ? 0 : Math.min(countNearby(Number(c.lat), Number(c.lng), c.owner_id, c.id), maxProx);   // 봇은 보급선 없음 (서버 규칙과 일치)
   const proxCls = myProx > defProx ? 'good' : myProx < defProx ? 'bad' : '';
   const proxLine = `<div class="supply-line ${proxCls}">🔗 보급선 — 시작 돌 <b>나 ${1+myProx}</b> vs <b>상대 ${1+defProx}</b>
     <span class="dim">(800m 내 아군 셀당 +1, 최대 +${maxProx})</span></div>`;
@@ -672,9 +673,11 @@ function showWaiting(c) {
 // 도전자: AI 방어로 진행 (방어자 미응답/오프라인)
 function beginVsAI() {
   const ov = $('overlay'); ov.classList.remove('show'); $('ovBack').style.display = '';
+  const vsBot = !!pending.cell?.is_bot;
   battle.start(pending.atkBet, pending.defBet, pending.cell.username || '적 거점',
     { mySide: 'atk', pvp: false, proximity: pending.proximity, hero: pending.hero,
-      tribeAdv: pending.tribeAdv });
+      tribeAdv: pending.tribeAdv,
+      aiStrength: vsBot ? CFG.MICRO.BOT_AI_STRENGTH : CFG.MICRO.AI_STRENGTH });
 }
 
 // 양쪽: PvP 실시간 대전 시작

@@ -328,8 +328,10 @@ export class MacroMap {
         ctx.font = 'bold 10px JetBrains Mono,monospace'; ctx.textAlign = 'center';
         ctx.fillText(`⚡${Math.floor(stored)}`, p.x, p.y + radius + 13);
       }
-      ctx.fillStyle = color; ctx.font = 'bold 10px JetBrains Mono,monospace'; ctx.textAlign = 'center';
-      ctx.fillText(c.username || '거점', p.x, p.y - radius - 5);
+      if (radius >= 14 || mine) {   // 줌아웃 시 라벨 생략 (겹침 노이즈 방지) — 내 셀은 항상
+        ctx.fillStyle = color; ctx.font = 'bold 10px JetBrains Mono,monospace'; ctx.textAlign = 'center';
+        ctx.fillText(c.username || '거점', p.x, p.y - radius - 5);
+      }
     }
     this._drawMyLoc();
     this._drawPreviewCell();

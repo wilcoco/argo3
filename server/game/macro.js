@@ -138,9 +138,13 @@ export async function getCellsInBounds(minLat, minLng, maxLat, maxLng) {
 async function getOrCreateBot(client) {
   // 임의의 기존 봇 재사용 (셀 분산 위해)
   const ex = (await client.query(
-    `SELECT id, tribe FROM players WHERE is_bot AND alive ORDER BY random() LIMIT 1`
+    `SELECT p.id, p.tribe FROM players p
+     LEFT JOIN cells c ON c.owner_id = p.id
+     WHERE p.is_bot AND p.alive
+     GROUP BY p.id HAVING COUNT(c.id) < 4
+     ORDER BY random() LIMIT 1`
   )).rows[0];
-  if (ex && Math.random() < 0.6) return ex; // 60% 확률로 기존 봇 사용 (셀 묶임)
+  if (ex && Math.random() < 0.6) return ex; // 60% 확률로 기존 봇 사용 (셀 묶임, 최대 4셀 — 메가봇 방지)
   // 새 봇 생성 — 종족 랜덤 분포
   const tribe = Math.floor(Math.random() * CONFIG.TRIBE_COUNT);
   const suffix = ['α','β','γ','δ','ε','ζ','η','θ','ι','κ','λ','μ'][Math.floor(Math.random()*12)];
@@ -212,6 +216,7 @@ export async function claimCell(playerId, lat, lng, value, playerLoc) {
 
     // 적 셀과 충돌 검사: 새 셀 물리 반경 + 적 셀 물리 반경 + 마진(ENEMY_CHALLENGE_DIST_M) 이내면
     // → 점유 대신 *도전 제안* (전선 형성)
+    // 봇 셀은 점유를 막지 않는다 — 봇은 먹잇감/환경이지 벽이 아님 (신규 유저 첫 점유 보호)
     const newR = cellRadiusM(v);
     const margin = MAC.ENEMY_CHALLENGE_DIST_M || 0;
     // 박스 1차 필터 → haversine 정밀
@@ -219,9 +224,10 @@ export async function claimCell(playerId, lat, lng, value, playerLoc) {
     const dLat = searchM / 111000;
     const dLng = dLat / Math.cos((lat * Math.PI) / 180);
     const nearby = (await client.query(
-      `SELECT id, owner_id, value, lat, lng FROM cells
-       WHERE owner_id IS NOT NULL
-         AND lat BETWEEN $1 AND $2 AND lng BETWEEN $3 AND $4`,
+      `SELECT c.id, c.owner_id, c.value, c.lat, c.lng FROM cells c
+       JOIN players p ON p.id = c.owner_id
+       WHERE c.owner_id IS NOT NULL AND NOT p.is_bot
+         AND c.lat BETWEEN $1 AND $2 AND c.lng BETWEEN $3 AND $4`,
       [lat - dLat, lat + dLat, lng - dLng, lng + dLng]
     )).rows;
     for (const c of nearby) {
@@ -361,6 +367,7 @@ export async function startChallenge(attackerId, target, atkBet, playerLoc) {
 
     const R = CONFIG.MICRO.PROXIMITY_RADIUS_M;
     const proximity = await countProximityCells(client, cell.lat, cell.lng, R, attackerId, cell.owner_id);
+    if (def && def.is_bot) proximity.def = 0;   // 봇은 보급선 없음 — 셀이 많아도 요새가 되지 않게
     const hero = { atk: !!atk.is_hero, def: !!(def && def.is_hero) };
     const tribeAdv = tribeAdvOf(atk, def);
     return { battle: b, cell, attacker: atk, defender: def, proximity, hero, tribeAdv };
@@ -387,6 +394,7 @@ export async function getBattleContext(battleId) {
   const proximity = await countProximityCells(
     shim, Number(cell.lat), Number(cell.lng),
     CONFIG.MICRO.PROXIMITY_RADIUS_M, b.attacker_id, b.defender_id);
+  if (def.is_bot) proximity.def = 0;   // 봇은 보급선 없음
   return {
     atkId: b.attacker_id, defId: b.defender_id,
     atkBet: Number(b.atk_bet), defBet: Number(b.def_bet),
@@ -434,6 +442,7 @@ export async function popNextChallenger(cellId) {
       const def = (await client.query(`SELECT * FROM players WHERE id=$1`, [cell.owner_id])).rows[0];
       const R = CONFIG.MICRO.PROXIMITY_RADIUS_M;
       const proximity = await countProximityCells(client, Number(cell.lat), Number(cell.lng), R, next.challenger_id, cell.owner_id);
+      if (def && def.is_bot) proximity.def = 0;   // 봇은 보급선 없음
       const hero = { atk: !!atk.is_hero, def: !!(def && def.is_hero) };
       const tribeAdv = tribeAdvOf(atk, def);
       return { battle: b, cell, attacker: atk, defender: def, proximity, hero, tribeAdv, challengerId: next.challenger_id };
@@ -767,6 +776,15 @@ export async function ecosystemTick(io) {
   tc.forEach((r) => (counts[r.tribe] = Number(r.c)));
   for (let i = 0; i < CONFIG.TRIBE_COUNT; i++) {
     await query(`UPDATE tribes SET total_cells=$1 WHERE id=$2`, [counts[i], i]);
+  }
+
+  // 4.5) 좀비 전투 정산 — 클라이언트가 결과 보고 없이 이탈한 전투.
+  //      active로 남으면 그 셀은 영원히 "busy" → 아무도 도전 못 하는 죽은 땅이 된다.
+  const zombies = (await query(
+    `SELECT id FROM battles WHERE status='active' AND started_at < now() - interval '5 minutes'`
+  )).rows;
+  for (const z of zombies) {
+    try { await resolveChallenge(Number(z.id), {}); } catch (e) { /* 개별 실패 무시 */ }
   }
 
   // 5) 영웅 만료

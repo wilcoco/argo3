@@ -67,7 +67,7 @@ input[type=text]{width:100%;padding:12px;border-radius:8px;border:1px solid var(
   display:flex;align-items:center;justify-content:center;cursor:pointer;
   touch-action:manipulation;}
 .zoom-btn:active{background:var(--line2);}
-.maphint{position:absolute;top:54px;left:50%;transform:translateX(-50%);z-index:10;
+.maphint{position:absolute;bottom:52px;left:50%;transform:translateX(-50%);z-index:10;
   background:rgba(10,14,20,.85);border:1px solid var(--line);border-radius:8px;
   padding:6px 14px;font-size:11px;color:var(--dim);pointer-events:none;white-space:nowrap;}
 .maphint b{color:var(--pl);}
@@ -169,7 +169,7 @@ input[type=range]{flex:1;accent-color:var(--pl);height:4px;}
 .harvest-chip b{margin-left:2px;}
 @keyframes harvestGlow{0%,100%{box-shadow:0 0 4px rgba(255,224,110,.2)}50%{box-shadow:0 0 10px rgba(255,224,110,.55)}}
 
-.activity-ticker{position:absolute;top:52px;left:50%;transform:translateX(-50%) translateY(-6px);z-index:22;
+.activity-ticker{position:absolute;top:96px;left:50%;transform:translateX(-50%) translateY(-6px);z-index:22;
   background:rgba(10,15,22,.9);border:1px solid rgba(255,255,255,.15);border-radius:14px;
   padding:5px 14px;font-size:11px;color:var(--fg);max-width:86%;white-space:nowrap;overflow:hidden;
   text-overflow:ellipsis;opacity:0;transition:all .3s ease;pointer-events:none;}
