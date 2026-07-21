@@ -62,6 +62,9 @@ CREATE INDEX IF NOT EXISTS idx_players_bot ON players(is_bot);
 ALTER TABLE cells ADD COLUMN IF NOT EXISTS rest_until BIGINT;
 -- 타워별 에너지 저장 (수확 루프) — 생산은 틱에서 누적, 수확으로 지갑 이전
 ALTER TABLE cells ADD COLUMN IF NOT EXISTS stored_energy REAL NOT NULL DEFAULT 0;
+-- 최초 가치 (전선 잠식 하한 기준: value_base × VALUE_FLOOR_RATIO 밑으론 자동 잠식 불가)
+ALTER TABLE cells ADD COLUMN IF NOT EXISTS value_base REAL;
+UPDATE cells SET value_base = value WHERE value_base IS NULL;
 ALTER TABLE cells ADD COLUMN IF NOT EXISTS consec_defenses INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE cells ADD COLUMN IF NOT EXISTS defenses_today INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE cells ADD COLUMN IF NOT EXISTS defenses_day_start TIMESTAMPTZ;

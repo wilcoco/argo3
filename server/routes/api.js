@@ -5,7 +5,7 @@ import express from 'express';
 import {
   createPlayer, getPlayer, getCellsInBounds, claimCell,
   startChallenge, resolveChallenge, getTick, cancelQueueEntry, skipRest,
-  harvestCell, harvestAll, touchPlayer, getPlayerCells, getLeaderboard,
+  harvestCell, harvestAll, supplyCell, touchPlayer, getPlayerCells, getLeaderboard,
 } from '../game/macro.js';
 import { query } from '../db/pool.js';
 import { estimateWinProb } from '../game/battle.js';
@@ -115,6 +115,14 @@ router.post('/harvestall', async (req, res) => {
   try {
     const { playerId } = req.body;
     res.json(await harvestAll(Number(playerId)));
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+// 보급 — 지갑 에너지를 타워 저장고로 (전선 군량)
+router.post('/supply', async (req, res) => {
+  try {
+    const { playerId, cellId, amount } = req.body;
+    res.json(await supplyCell(Number(playerId), Number(cellId), amount));
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 

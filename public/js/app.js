@@ -499,12 +499,16 @@ function openCell(c) {
     const perHour = Number(c.value) * M.PROD_COEF * 3600;
     const full = stored >= cap - 0.01;
     const pct = Math.min(100, (stored / cap) * 100);
+    const siegeLine = c.contested
+      ? `<div class="siege-line">⚔ 교전 중! 군량 −${(c.siege_dph||0).toFixed(1)}/h — 생산 정지. 군량이 바닥나면 타워가 잠식됩니다.</div>`
+      : '';
     $('sheetBody').innerHTML = `
       <h3>${c.username || '내 거점'} <span class="tag me">내 영역</span></h3>
-      <div class="sub">가치 ${c.value} · 자동방어 베팅 ⚡${c.def_bet}</div>
+      <div class="sub">가치 ${Math.round(c.value)} · 자동방어 베팅 ⚡${c.def_bet}</div>
+      ${siegeLine}
       <div class="prod-line">
         <span class="prod-num">⚡${stored.toFixed(1)}<span class="dim">/${cap.toFixed(0)} 저장</span></span>
-        <span class="dim">${full ? '⚠ 가득 — 생산 정지!' : `생산 +${perHour.toFixed(1)}/h`}</span>
+        <span class="dim">${c.contested ? '⚔ 소모 중' : full ? '⚠ 가득 — 생산 정지!' : `생산 +${perHour.toFixed(1)}/h`}</span>
       </div>
       <div class="storebar"><div class="storebar-fill${full ? ' full' : ''}" style="width:${pct}%"></div></div>
       ${stored >= 1 ? `
@@ -515,9 +519,21 @@ function openCell(c) {
       </div>` : `<div class="sub dim">아직 수확할 에너지가 없습니다 (방치하면 적이 약탈할 수 있어요)</div>`}
       <div class="btnrow">
         <button class="btn ghost" id="cancelBtn">닫기</button>
+        ${cap - stored >= 1 && me.energy >= 1 ? `<button class="btn ghost supply-btn" id="supplyBtn">🎒 보급</button>` : ''}
         ${stored >= 1 ? `<button class="btn primary" id="harvestBtn">수확</button>` : ''}
       </div>`;
     openSheet(); $('cancelBtn').onclick = closeSheet;
+    const supBtn = $('supplyBtn');
+    if (supBtn) {
+      supBtn.onclick = async () => {
+        try {
+          // 기본: 채울 수 있는 만큼 (지갑 한도 내)
+          const r = await api('/supply', { method: 'POST', body: { playerId: me.id, cellId: c.id } });
+          toast(`🎒 보급 ⚡${r.supplied.toFixed(0)} — 타워 군량 ${r.stored.toFixed(0)}`);
+          closeSheet(); await refreshMe(); await refreshCells();
+        } catch (e) { toast(e.message, 'err'); }
+      };
+    }
     const slider = $('harvestAmt');
     if (slider) {
       slider.addEventListener('input', () => { $('harvestVal').textContent = '⚡' + slider.value; });

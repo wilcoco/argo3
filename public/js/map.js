@@ -288,6 +288,98 @@ export class MacroMap {
     ctx.restore();
   }
 
+  // ============================================================
+  // 타워 벡터 그래픽 — 어셋 파일 없이 캔버스로 직접 (사운드처럼 프로시저럴)
+  // 가치별 3단계: 포탑(<34) / 타워(<67) / 요새(≥67), 봇은 로봇 헤드
+  // ============================================================
+  _drawTower(ctx, x, y, r, color, value, isBot) {
+    if (r < 11) return;                       // 줌아웃 시 생략 (원만)
+    const h = r * 1.15;                       // 전체 높이
+    const w = r * 0.85;                       // 전체 폭
+    ctx.save();
+    ctx.translate(x, y + r * 0.18);           // 살짝 아래 기준 (원 안에 앉게)
+    ctx.lineWidth = Math.max(1, r * 0.07);
+    ctx.strokeStyle = color;
+    ctx.fillStyle = this._alpha(color, 0.30);
+
+    const crenel = (bx, by, bw, n) => {       // 성가퀴 (톱니)
+      const cw = bw / (n * 2 - 1);
+      ctx.rect(bx, by - cw * 1.2, cw * (n * 2 - 1), 0.01);
+      for (let i = 0; i < n; i++) ctx.rect(bx + i * cw * 2, by - cw * 1.2, cw, cw * 1.2);
+    };
+
+    ctx.beginPath();
+    if (isBot) {
+      // 로봇 헤드: 사각 몸통 + 안테나 + 눈
+      ctx.rect(-w * 0.42, -h * 0.35, w * 0.84, h * 0.62);
+      ctx.moveTo(0, -h * 0.35); ctx.lineTo(0, -h * 0.62);
+      ctx.moveTo(-w * 0.14, -h * 0.62); ctx.arc(0, -h * 0.62, w * 0.14, Math.PI, 0);
+      ctx.fill(); ctx.stroke();
+      // 눈 (단색 점)
+      ctx.beginPath();
+      ctx.arc(-w * 0.18, -h * 0.08, r * 0.09, 0, Math.PI * 2);
+      ctx.arc(w * 0.18, -h * 0.08, r * 0.09, 0, Math.PI * 2);
+      ctx.fillStyle = color; ctx.fill();
+    } else if (value < 34) {
+      // 포탑: 몸통 + 성가퀴 3
+      ctx.rect(-w * 0.28, -h * 0.30, w * 0.56, h * 0.60);
+      crenel(-w * 0.28, -h * 0.30, w * 0.56, 3);
+      ctx.fill(); ctx.stroke();
+      // 문
+      ctx.beginPath(); ctx.rect(-w * 0.09, h * 0.02, w * 0.18, h * 0.28);
+      ctx.fillStyle = color; ctx.fill();
+    } else if (value < 67) {
+      // 타워: 높은 몸통 + 성가퀴 + 깃발
+      ctx.rect(-w * 0.24, -h * 0.48, w * 0.48, h * 0.78);
+      crenel(-w * 0.24, -h * 0.48, w * 0.48, 3);
+      ctx.fill(); ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(0, -h * 0.62); ctx.lineTo(0, -h * 0.86);
+      ctx.lineTo(w * 0.26, -h * 0.78); ctx.lineTo(0, -h * 0.70);
+      ctx.fillStyle = color; ctx.fill(); ctx.stroke();
+      ctx.beginPath(); ctx.rect(-w * 0.08, h * 0.06, w * 0.16, h * 0.24);
+      ctx.fillStyle = color; ctx.fill();
+    } else {
+      // 요새: 중앙 타워 + 양측 탑 + 성벽
+      ctx.rect(-w * 0.52, -h * 0.16, w * 1.04, h * 0.46);   // 성벽
+      ctx.rect(-w * 0.52, -h * 0.36, w * 0.22, h * 0.66);   // 좌탑
+      ctx.rect(w * 0.30, -h * 0.36, w * 0.22, h * 0.66);    // 우탑
+      ctx.rect(-w * 0.16, -h * 0.58, w * 0.32, h * 0.88);   // 중앙탑
+      crenel(-w * 0.16, -h * 0.58, w * 0.32, 2);
+      ctx.fill(); ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(0, -h * 0.70); ctx.lineTo(0, -h * 0.94);
+      ctx.lineTo(w * 0.24, -h * 0.87); ctx.lineTo(0, -h * 0.80);
+      ctx.fillStyle = color; ctx.fill(); ctx.stroke();
+      ctx.beginPath(); ctx.rect(-w * 0.10, h * 0.02, w * 0.20, h * 0.28);
+      ctx.fillStyle = color; ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  // 교전 연출 — 붉은 톱니 링 + 불꽃 파편
+  _drawSiege(ctx, x, y, r) {
+    const t = performance.now();
+    const pulse = 0.5 + 0.5 * Math.sin(t / 160);
+    ctx.save();
+    ctx.beginPath(); ctx.arc(x, y, r + 3, 0, Math.PI * 2);
+    ctx.setLineDash([3, 3]);
+    ctx.lineDashOffset = -(t / 40) % 6;
+    ctx.strokeStyle = `rgba(255,70,60,${0.55 + pulse * 0.4})`;
+    ctx.lineWidth = 2.2;
+    ctx.stroke(); ctx.setLineDash([]);
+    // 불꽃 파편 (셀 주위 랜덤 각도 — 시드는 시간 기반)
+    for (let i = 0; i < 3; i++) {
+      const a = ((t / 300 + i * 2.1) % 6.283);
+      const rr = r + 4 + ((t / 90 + i * 37) % 9);
+      ctx.beginPath();
+      ctx.arc(x + Math.cos(a) * rr, y + Math.sin(a) * rr, 1.6, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(255,${120 + i * 40},50,${0.8 - ((t / 90 + i * 37) % 9) / 12})`;
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
   _drawCells() {
     const ctx = this.ctx;
     this._drawClusterLinks();   // 셀 아래 레이어에 보급선
@@ -304,6 +396,9 @@ export class MacroMap {
       ctx.fillStyle = this._alpha(color, 0.16); ctx.fill();
       ctx.lineWidth = mine ? 3 : 1.6;
       ctx.strokeStyle = mine ? '#fff' : color; ctx.stroke();
+      // 타워 실루엣 (원 안)
+      this._drawTower(ctx, p.x, p.y, radius, color, Number(c.value) || 40, !!c.is_bot);
+      if (c.contested) this._drawSiege(ctx, p.x, p.y, radius);   // ⚔ 교전 중
       if (c.is_hero) { // 영웅 빛
         ctx.beginPath(); ctx.arc(p.x, p.y, radius+4, 0, Math.PI*2);
         ctx.strokeStyle = 'rgba(255,255,255,0.6)'; ctx.lineWidth = 2; ctx.stroke();

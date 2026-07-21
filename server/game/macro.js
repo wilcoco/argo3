@@ -112,6 +112,11 @@ export async function getPlayerCells(playerId) {
   return r.rows;
 }
 
+// ---- 전선 교전 상태 (틱마다 갱신, 클라 표시용) ----
+// cellId → { dph: 시간당 손실, enemies: 교전 상대 셀 수 }
+const siegeState = new Map();
+export function getSiegeState() { return siegeState; }
+
 // ---- 영토 조회 (지도 영역 내) ----
 export async function getCellsInBounds(minLat, minLng, maxLat, maxLng) {
   const a = latLngToCell(minLat, minLng);
@@ -128,6 +133,11 @@ export async function getCellsInBounds(minLat, minLng, maxLat, maxLng) {
     const needed = MAC.BOT_TARGET_PER_VIEW - cells.length;
     await ensureBotCells(minLat, minLng, maxLat, maxLng, needed);
     cells = (await query(sql, [x0, x1, y0, y1])).rows;
+  }
+  // 교전 상태 병합 (지도 연출 + 셀 시트 표시)
+  for (const c of cells) {
+    const sg = siegeState.get(Number(c.id));
+    if (sg) { c.contested = true; c.siege_dph = sg.dph; }
   }
   return cells;
 }
@@ -177,8 +187,8 @@ async function ensureBotCells(minLat, minLng, maxLat, maxLng, count) {
       const loot = MAC.BOT_LOOT_MIN + Math.floor(Math.random() * (MAC.BOT_LOOT_MAX - MAC.BOT_LOOT_MIN));
       const { cellX, cellY } = latLngToCell(lat, lng);
       await client.query(
-        `INSERT INTO cells (cell_x, cell_y, owner_id, tribe, value, def_bet, lat, lng, stored_energy)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+        `INSERT INTO cells (cell_x, cell_y, owner_id, tribe, value, def_bet, lat, lng, stored_energy, value_base)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $5)`,
         [cellX, cellY, bot.id, bot.tribe, value, defBet, lat, lng, loot]
       );
     }
@@ -253,8 +263,8 @@ export async function claimCell(playerId, lat, lng, value, playerLoc) {
     const { cellX, cellY } = latLngToCell(lat, lng);
     const defBet = Math.round(v * 0.5);
     const ins = await client.query(
-      `INSERT INTO cells (cell_x, cell_y, owner_id, tribe, value, def_bet, lat, lng)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
+      `INSERT INTO cells (cell_x, cell_y, owner_id, tribe, value, def_bet, lat, lng, value_base)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$5) RETURNING id`,
       [cellX, cellY, playerId, p.tribe, v, defBet, lat, lng]
     );
     // 에너지 차감 + 저장 상한 LEAST cap
@@ -477,6 +487,28 @@ export async function harvestCell(playerId, cellId, amount) {
       stored: stored - harvested,
       energy: Number(p.energy) + harvested,
     };
+  });
+}
+
+// ---- 보급 — 지갑 에너지를 타워 저장고로 (수확의 역방향, 전선 군량 채우기) ----
+export async function supplyCell(playerId, cellId, amount) {
+  return tx(async (client) => {
+    const cell = (await client.query(`SELECT * FROM cells WHERE id=$1 FOR UPDATE`, [Number(cellId)])).rows[0];
+    if (!cell) throw new Error('셀 없음');
+    if (cell.owner_id !== Number(playerId)) throw new Error('내 영역이 아닙니다');
+    const p = (await client.query(`SELECT * FROM players WHERE id=$1 FOR UPDATE`, [playerId])).rows[0];
+    if (!p) throw new Error('플레이어 없음');
+    const cap = Number(cell.value) * MAC.CAP_FACTOR;
+    const room = Math.max(0, cap - Number(cell.stored_energy));
+    let want = Number.isFinite(Number(amount)) && Number(amount) > 0 ? Number(amount) : room;
+    const supplied = Math.min(want, room, Number(p.energy));
+    if (supplied <= 0) {
+      if (room <= 0) throw new Error('타워 저장고가 가득 찼습니다');
+      throw new Error('에너지 부족');
+    }
+    await client.query(`UPDATE cells SET stored_energy = stored_energy + $1::real WHERE id=$2`, [supplied, cellId]);
+    await client.query(`UPDATE players SET energy = energy - $1::real WHERE id=$2`, [supplied, playerId]);
+    return { supplied, stored: Number(cell.stored_energy) + supplied, energy: Number(p.energy) - supplied };
   });
 }
 
@@ -741,12 +773,95 @@ export async function ecosystemTick(io) {
   //    생산률 = PROD_COEF × value /초, 저장 상한 = CAP_FACTOR × value.
   //    가득 차면 생산 정지 → 수확해야 재개. 지갑은 수확으로만 늘어난다.
   const tickSec = MAC.SERVER_TICK_MS / 1000;
+  const contestedIds = [...siegeState.keys()];
   await query(`
     UPDATE cells c SET stored_energy = LEAST(c.value * $2::real, c.stored_energy + c.value * $1::real)
     FROM players p
     WHERE p.id = c.owner_id AND p.alive AND NOT p.is_bot
       AND c.stored_energy < c.value * $2::real
-  `, [MAC.PROD_COEF * tickSec, MAC.CAP_FACTOR]);
+      AND NOT (c.id = ANY($3::bigint[]))
+  `, [MAC.PROD_COEF * tickSec, MAC.CAP_FACTOR, contestedIds]);
+
+  // 1a) 전선 마모전 — 인접 적 타워끼리 상호 소모 (압박만 자동, 함락은 마이크로)
+  //     군량(stored_energy) 먼저 태우고, 바닥나면 value 잠식 (하한 value_base × FLOOR).
+  //     봇은 압박을 가하지 않음(받기만) / 수면 보호 중 소유자의 셀은 전선에서 제외.
+  await (async () => {
+    const SG = CONFIG.SIEGE;
+    const rows = (await query(`
+      SELECT c.id, c.owner_id, c.tribe, c.value, c.value_base, c.stored_energy, c.lat, c.lng,
+             p.is_bot, p.last_seen
+      FROM cells c JOIN players p ON p.id = c.owner_id
+      WHERE c.lat IS NOT NULL`)).rows;
+    // 수면 보호 판정 (도전 규칙과 동일)
+    const offlineAfter = CONFIG.SHIELD.OFFLINE_AFTER_MIN * 60 * 1000;
+    const shieldEnd = offlineAfter + CONFIG.SHIELD.BASE_HOURS * 3600 * 1000;
+    const now = Date.now();
+    const shielded = (r) => {
+      if (r.is_bot) return false;
+      const off = now - new Date(r.last_seen).getTime();
+      return off > offlineAfter && off < shieldEnd;
+    };
+    const active = rows.filter((r) => !shielded(r));
+    // 그리드 해시로 인접쌍 탐색 (~500셀 O(N²) 방지)
+    const CELL_M = 400;
+    const keyOf = (la, ln) => `${Math.floor(la * 111000 / CELL_M)}:${Math.floor(ln * 111000 * Math.cos(la * Math.PI / 180) / CELL_M)}`;
+    const grid = new Map();
+    for (const r of active) {
+      const k = keyOf(Number(r.lat), Number(r.lng));
+      if (!grid.has(k)) grid.set(k, []);
+      grid.get(k).push(r);
+    }
+    const radiusM = (v) => MAC.CELL_PHYSICAL_BASE_M * Math.sqrt((Number(v) || 40) / 40);
+    const drain = new Map();   // cellId → 누적 압박
+    const enemyCnt = new Map();
+    for (const a of active) {
+      const la = Number(a.lat), ln = Number(a.lng);
+      const gy = Math.floor(la * 111000 / CELL_M);
+      const gx = Math.floor(ln * 111000 * Math.cos(la * Math.PI / 180) / CELL_M);
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        const bucket = grid.get(`${gy + dy}:${gx + dx}`);
+        if (!bucket) continue;
+        for (const b of bucket) {
+          if (Number(b.id) <= Number(a.id)) continue;          // 쌍 중복 방지
+          if (a.owner_id === b.owner_id) continue;
+          const d = haversineM(la, ln, Number(b.lat), Number(b.lng));
+          if (d > radiusM(a.value) + radiusM(b.value) + SG.CONTACT_MARGIN_M) continue;
+          // 접촉! a→b, b→a 압박 (봇은 가하지 않음)
+          if (!a.is_bot) {
+            const mult = tribeBeats(a.tribe, b.tribe) ? 1 + SG.TRIBE_MULT : 1;
+            drain.set(Number(b.id), (drain.get(Number(b.id)) || 0) + Number(a.value) * SG.DRAIN_COEF * mult);
+            enemyCnt.set(Number(b.id), (enemyCnt.get(Number(b.id)) || 0) + 1);
+          }
+          if (!b.is_bot) {
+            const mult = tribeBeats(b.tribe, a.tribe) ? 1 + SG.TRIBE_MULT : 1;
+            drain.set(Number(a.id), (drain.get(Number(a.id)) || 0) + Number(b.value) * SG.DRAIN_COEF * mult);
+            enemyCnt.set(Number(a.id), (enemyCnt.get(Number(a.id)) || 0) + 1);
+          }
+        }
+      }
+    }
+    // 적용 + 교전 상태 갱신
+    siegeState.clear();
+    const byId = new Map(rows.map((r) => [Number(r.id), r]));
+    for (const [cid, dmg] of drain) {
+      const c = byId.get(cid);
+      if (!c) continue;
+      let stored = Number(c.stored_energy);
+      let value = Number(c.value);
+      const floor = Math.max(MAC.CLAIM_MIN_VALUE * 0.5, (Number(c.value_base) || value) * SG.VALUE_FLOOR_RATIO);
+      let left = dmg;
+      const fromStore = Math.min(stored, left);
+      stored -= fromStore; left -= fromStore;
+      if (left > 0 && value > floor) {
+        value = Math.max(floor, value - left * SG.VALUE_RESIST);
+      }
+      await query(
+        `UPDATE cells SET stored_energy=$1::real, value=$2::real, def_bet=LEAST(def_bet, $2::real) WHERE id=$3`,
+        [stored, value, cid]);
+      // 시간당 손실 (표시용): 틱당 dmg × 720
+      siegeState.set(cid, { dph: Math.round(dmg * 720 * 10) / 10, enemies: enemyCnt.get(cid) || 1 });
+    }
+  })();
 
   // 1b) 봇 셀 청소 — TTL 지난 봇 셀 제거 (시간당 1회면 충분)
   if (tick % 720 === 0) {

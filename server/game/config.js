@@ -135,6 +135,16 @@ export const CONFIG = {
     WEAK_BOOST_POWER: 2,
   },
 
+  // ---- 전선 마모전 (매크로 포위전) — 시뮬 검증 (docs/GAME_SPEC.md) ----
+  // 인접 적 타워끼리 틱마다 상호 소모. 압박만 자동 — 함락은 여전히 마이크로 도전.
+  SIEGE: {
+    DRAIN_COEF: 0.0001,        // 틱당 압박량 = 타워 value × 이값. 1:1 만재 대치 = 군량 42h
+    VALUE_RESIST: 0.5,         // 군량 소진 후 value 잠식은 2배 느림
+    TRIBE_MULT: 0.3,           // 종족 상성 우세 시 압박 +30%
+    VALUE_FLOOR_RATIO: 0.5,    // 잠식 하한 = 최초 가치 × 이값 (자동으론 절대 죽지 않음)
+    CONTACT_MARGIN_M: 50,      // 접촉 판정 = 물리 반경 합 + 이 마진
+  },
+
   // ---- 데일리 퀘스트 (KST 자정 리셋) ----
   QUESTS: [
     { key: 'win',     icon: '⚔',  label: '전투 3회 승리',    target: 3,   reward: 60 },
